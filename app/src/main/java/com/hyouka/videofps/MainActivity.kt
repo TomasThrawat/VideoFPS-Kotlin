@@ -46,12 +46,15 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AppLogger.init(this)
+        AppLogger.i("MainActivity", "onCreate")
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         buildUi()
         updateButtonStates()
     }
 
     override fun onDestroy() {
+        AppLogger.i("MainActivity", "onDestroy")
         if (processRunning) {
             FpsProcessor.cancel()
         }
@@ -157,6 +160,7 @@ class MainActivity : Activity() {
     }
 
     private fun openVideoPicker() {
+        AppLogger.i("Picker", "Opening video picker")
         if (processRunning) return
 
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
@@ -169,6 +173,7 @@ class MainActivity : Activity() {
     }
 
     private fun startConversion(targetFps: Int) {
+        AppLogger.i("Conversion", "Requested target FPS=" + targetFps)
         val input = selectedUri ?: run {
             statusText.text = "اختار فيديو أولاً"
             return
@@ -203,6 +208,7 @@ class MainActivity : Activity() {
         inputUri: Uri,
         targetFps: Int
     ): ConversionResult {
+        AppLogger.i("Conversion", "runConversion started targetFps=" + targetFps)
         var inputFd = -1
         var outputFd = -1
         var outputUri: Uri? = null
@@ -246,6 +252,7 @@ class MainActivity : Activity() {
             }
             outputFd = outputDescriptor.detachFd()
 
+            AppLogger.i("Native", "Calling FpsProcessor.process")
             val error = FpsProcessor.process(
                 inputFd,
                 outputFd,
@@ -263,7 +270,9 @@ class MainActivity : Activity() {
             closeFd(outputFd)
             outputFd = -1
 
+            AppLogger.i("Native", "FpsProcessor.process returned: " + (error ?: "success"))
             if (error != null) {
+                AppLogger.e("Conversion", "Conversion failed: " + error)
                 contentResolver.delete(outputUri, null, null)
                 outputUri = null
                 return ConversionResult(false, error, null)
@@ -375,6 +384,7 @@ class MainActivity : Activity() {
 
         val uri = data?.data ?: return
         selectedUri = uri
+        AppLogger.i("Picker", "Selected URI=" + uri)
 
         try {
             contentResolver.takePersistableUriPermission(
@@ -385,6 +395,7 @@ class MainActivity : Activity() {
         }
 
         selectedName = queryDisplayName(uri) ?: "video"
+        AppLogger.i("Picker", "Selected name=" + selectedName)
         val metadata = readMetadata(uri)
 
         infoText.text = buildString {

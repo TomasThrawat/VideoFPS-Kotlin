@@ -2,7 +2,14 @@ package com.hyouka.videofps
 
 object FpsProcessor {
     init {
-        System.loadLibrary("videofps")
+        try {
+            AppLogger.i("Native", "Loading libvideofps.so")
+            System.loadLibrary("videofps")
+            AppLogger.i("Native", "libvideofps.so loaded successfully")
+        } catch (t: Throwable) {
+            AppLogger.e("Native", "Failed to load libvideofps.so", t)
+            throw t
+        }
     }
 
     external fun process(
@@ -14,8 +21,8 @@ object FpsProcessor {
     ): String?
 
     external fun cancel()
-}
 
-fun interface ProgressListener {
-    fun onProgress(percent: Int)
+    interface ProgressListener {
+        fun onProgress(percent: Int)
+    }
 }
