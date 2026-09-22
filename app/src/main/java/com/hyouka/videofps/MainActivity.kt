@@ -257,13 +257,16 @@ class MainActivity : Activity() {
                 inputFd,
                 outputFd,
                 targetFps,
-                metadata.durationUs
-            ) { percent ->
-                runOnUiThread {
-                    progressBar.progress = percent.coerceIn(0, 100)
-                    statusText.text = "جاري التحويل... $percent%"
+                metadata.durationUs,
+                object : FpsProcessor.ProgressListener {
+                    override fun onProgress(percent: Int) {
+                        runOnUiThread {
+                            progressBar.progress = percent.coerceIn(0, 100)
+                            statusText.text = "جاري التحويل... $percent%"
+                        }
+                    }
                 }
-            }
+            )
 
             closeFd(inputFd)
             inputFd = -1
