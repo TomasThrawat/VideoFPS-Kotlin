@@ -287,6 +287,7 @@ class MainActivity : Activity() {
                 "Preparing listener class=" + listener.javaClass.name +
                     " identity=" + System.identityHashCode(listener)
             )
+            FpsProcessor.setProgressListener(listener)
             AppLogger.i(
                 "Native",
                 "Calling FpsProcessor.process inputFd=" + inputFd +
@@ -295,13 +296,16 @@ class MainActivity : Activity() {
                     " durationUs=" + metadata.durationUs
             )
 
-            val error = FpsProcessor.process(
-                inputFd,
-                outputFd,
-                targetFps,
-                metadata.durationUs,
-                listener
-            )
+            val error = try {
+                FpsProcessor.process(
+                    inputFd,
+                    outputFd,
+                    targetFps,
+                    metadata.durationUs
+                )
+            } finally {
+                FpsProcessor.setProgressListener(null)
+            }
             closeFd(inputFd)
             inputFd = -1
             closeFd(outputFd)
