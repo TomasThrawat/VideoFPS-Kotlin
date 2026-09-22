@@ -1,9 +1,11 @@
 #include <jni.h>
 #include <unistd.h>
+#include <android/log.h>
 
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <cstdarg>
 #include <string>
 
 extern "C" {
@@ -18,6 +20,25 @@ extern "C" {
 }
 
 namespace {
+
+constexpr const char* kNativeBuildId = "jni-listener-diag-20260922-2";
+
+void nativeLog(const char* level, const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+
+    int priority = ANDROID_LOG_DEBUG;
+    if (level[0] == 'E') {
+        priority = ANDROID_LOG_ERROR;
+    } else if (level[0] == 'W') {
+        priority = ANDROID_LOG_WARN;
+    } else if (level[0] == 'I') {
+        priority = ANDROID_LOG_INFO;
+    }
+
+    __android_log_vprint(priority, "VideoFPS-Native", format, args);
+    va_end(args);
+}
 
 std::atomic_bool g_cancel{false};
 
@@ -142,17 +163,38 @@ std::string processVideo(
 ) {
     g_cancel.store(false);
 
+    nativeLog(
+        "I",
+        "processVideo start inputFd=%d outputFd=%d targetFps=%d durationUs=%lld listener=%p",
+        inputFd,
+        outputFd,
+        targetFps,
+        static_cast<long long>(durationUs),
+        static_cast<void*>(listener)
+    );
+
     // Resolve the listener from the actual object instance.
     // This avoids assuming the JVM binary name of the nested Kotlin interface.
+    nativeLog("I", "Calling GetObjectClass(listener)");
     jclass listenerClass = env->GetObjectClass(listener);
 
     if (!listenerClass) {
-        if (env->ExceptionCheck()) {
+        const bool hasException = env->ExceptionCheck();
+        nativeLog(
+            "E",
+            "GetObjectClass(listener) returned NULL exception=%s",
+            hasException ? "yes" : "no"
+        );
+        if (hasException) {
+            env->ExceptionDescribe();
             env->ExceptionClear();
         }
-        return "تعذر تجهيز مستمع التقدم";
+        return "تعذر تجهيز مستمع التقدم: GetObjectClass فشل";
     }
 
+    nativeLog("I", "GetObjectClass(listener) succeeded");
+
+    nativeLog("I", "Calling GetMethodID(onProgress,(I)V)");
     jmethodID progressMethod =
         env->GetMethodID(
             listenerClass,
@@ -163,11 +205,20 @@ std::string processVideo(
     env->DeleteLocalRef(listenerClass);
 
     if (!progressMethod) {
-        if (env->ExceptionCheck()) {
+        const bool hasException = env->ExceptionCheck();
+        nativeLog(
+            "E",
+            "GetMethodID(onProgress,(I)V) returned NULL exception=%s",
+            hasException ? "yes" : "no"
+        );
+        if (hasException) {
+            env->ExceptionDescribe();
             env->ExceptionClear();
         }
-        return "تعذر تجهيز التقدم";
+        return "تعذر تجهيز التقدم: onProgress(I)V غير موجود";
     }
+
+    nativeLog("I", "Progress listener method resolved successfully");
 
     const std::string inputPath =
         "/proc/self/fd/" + std::to_string(inputFd);
@@ -194,9 +245,11 @@ std::string processVideo(
     int ret = 0;
     std::string error;
 
+    nativeLog("I", "FFmpeg pipeline initialization started");
     av_log_set_level(AV_LOG_ERROR);
 
     do {
+        nativeLog("I", "Opening input path=%s", inputPath.c_str());
         ret = avformat_open_input(
             &input,
             inputPath.c_str(),
@@ -205,13 +258,16 @@ std::string processVideo(
         );
 
         if (ret < 0) {
+            nativeLog("E", "avformat_open_input failed ret=%d error=%s", ret, ffError(ret).c_str());
             error = "فتح الفيديو فشل: " + ffError(ret);
             break;
         }
 
+        nativeLog("I", "Input opened; reading stream info");
         ret = avformat_find_stream_info(input, nullptr);
 
         if (ret < 0) {
+            nativeLog("E", "avformat_find_stream_info failed ret=%d error=%s", ret, ffError(ret).c_str());
             error =
                 "قراءة معلومات الفيديو فشلت: " +
                 ffError(ret);
@@ -233,13 +289,32 @@ std::string processVideo(
             }
         }
 
+        nativeLog(
+            "I",
+            "Streams detected videoIndex=%d audioIndex=%d count=%u",
+            videoInputIndex,
+            audioInputIndex,
+            input->nb_streams
+        );
+
         if (videoInputIndex < 0) {
+            nativeLog("E", "No video stream found");
             error = "لم يتم العثور على مسار فيديو";
             break;
         }
 
         AVStream* inputVideo =
             input->streams[videoInputIndex];
+
+        nativeLog(
+            "I",
+            "Input video codecId=%d width=%d height=%d timeBase=%d/%d",
+            inputVideo->codecpar->codec_id,
+            inputVideo->codecpar->width,
+            inputVideo->codecpar->height,
+            inputVideo->time_base.num,
+            inputVideo->time_base.den
+        );
 
         const AVCodec* decoderCodec =
             avcodec_find_decoder(
@@ -273,6 +348,7 @@ std::string processVideo(
 
         decoder->thread_count = 0;
 
+        nativeLog("I", "Opening decoder");
         ret = avcodec_open2(
             decoder,
             decoderCodec,
@@ -280,6 +356,7 @@ std::string processVideo(
         );
 
         if (ret < 0) {
+            nativeLog("E", "Decoder open failed ret=%d error=%s", ret, ffError(ret).c_str());
             error =
                 "فتح مفكك الفيديو فشل: " +
                 ffError(ret);
@@ -299,6 +376,12 @@ std::string processVideo(
                 ffError(ret);
             break;
         }
+
+        nativeLog(
+            "I",
+            "Opening OpenH264 encoder targetFps=%d",
+            targetFps
+        );
 
         const AVCodec* encoderCodec =
             avcodec_find_encoder_by_name(
@@ -359,6 +442,12 @@ std::string processVideo(
                 AV_CODEC_FLAG_GLOBAL_HEADER;
         }
 
+        nativeLog(
+            "I",
+            "Calling avcodec_open2 on OpenH264 %dx%d",
+            encoder->width,
+            encoder->height
+        );
         ret = avcodec_open2(
             encoder,
             encoderCodec,
@@ -366,6 +455,7 @@ std::string processVideo(
         );
 
         if (ret < 0) {
+            nativeLog("E", "OpenH264 open failed ret=%d error=%s", ret, ffError(ret).c_str());
             error =
                 "فتح OpenH264 فشل: " +
                 ffError(ret);
@@ -589,12 +679,14 @@ std::string processVideo(
                 break;
             }
 
+            nativeLog("I", "Configuring filter chain=%s", filterChain.c_str());
             ret = avfilter_graph_config(
                 graph,
                 nullptr
             );
 
             if (ret < 0) {
+                nativeLog("E", "Filter graph config failed ret=%d error=%s", ret, ffError(ret).c_str());
                 error =
                     "تهيئة فلتر interpolation فشلت: " +
                     ffError(ret);
@@ -615,12 +707,14 @@ std::string processVideo(
             break;
         }
 
+        nativeLog("I", "Writing MP4 header");
         ret = avformat_write_header(
             output,
             nullptr
         );
 
         if (ret < 0) {
+            nativeLog("E", "avformat_write_header failed ret=%d error=%s", ret, ffError(ret).c_str());
             error =
                 "كتابة رأس MP4 فشلت: " +
                 ffError(ret);
@@ -905,6 +999,7 @@ std::string processVideo(
             break;
         }
 
+        nativeLog("I", "Pipeline completed; reporting 100%%");
         reportProgress(
             env,
             listener,
@@ -933,10 +1028,25 @@ std::string processVideo(
     close(inputFd);
     close(outputFd);
 
+    nativeLog(
+        error.empty() ? "I" : "E",
+        "processVideo end error=%s",
+        error.empty() ? "<none>" : error.c_str()
+    );
+
     return error;
 }
 
 }  // namespace
+
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_com_hyouka_videofps_FpsProcessor_getNativeBuildId(
+    JNIEnv* env,
+    jobject
+) {
+    return env->NewStringUTF(kNativeBuildId);
+}
 
 extern "C"
 JNIEXPORT jstring JNICALL
@@ -949,6 +1059,16 @@ Java_com_hyouka_videofps_FpsProcessor_process(
     jlong durationUs,
     jobject listener
 ) {
+    nativeLog(
+        "I",
+        "JNI process called inputFd=%d outputFd=%d targetFps=%d durationUs=%lld listener=%p",
+        inputFd,
+        outputFd,
+        targetFps,
+        static_cast<long long>(durationUs),
+        static_cast<void*>(listener)
+    );
+
     if (targetFps != 60 &&
         targetFps != 90 &&
         targetFps != 120) {
@@ -978,6 +1098,12 @@ Java_com_hyouka_videofps_FpsProcessor_process(
             env,
             listener
         );
+
+    nativeLog(
+        error.empty() ? "I" : "E",
+        "JNI process returning %s",
+        error.empty() ? "success" : error.c_str()
+    );
 
     if (error.empty()) {
         return nullptr;
