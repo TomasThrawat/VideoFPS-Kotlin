@@ -94,6 +94,18 @@ jobs:
         run: |
           gradle --no-daemon --stacktrace --warning-mode all lintDebug
 
+      - name: Verify compiled JNI descriptor
+        run: |
+          set -e
+          CLASS_FILE="$(find app/build -type f -path '*/com/hyouka/videofps/FpsProcessor.class' -print -quit)"
+          test -n "$CLASS_FILE"
+          CLASS_ROOT="$(dirname "$(dirname "$(dirname "$(dirname "$CLASS_FILE")")")")"
+          javap -classpath "$CLASS_ROOT" -p -s com.hyouka.videofps.FpsProcessor | tee /tmp/fpsprocessor-javap.txt
+          grep -F 'process:(IIIJ)Ljava/lang/String;' /tmp/fpsprocessor-javap.txt
+          grep -F 'getNativeBuildId:()Ljava/lang/String;' /tmp/fpsprocessor-javap.txt
+          grep -F 'cancel:()V' /tmp/fpsprocessor-javap.txt
+          grep -F 'dispatchProgress:(I)V' /tmp/fpsprocessor-javap.txt
+
       - name: Build debug APK
         run: |
           gradle --no-daemon --stacktrace --warning-mode all assembleDebug
