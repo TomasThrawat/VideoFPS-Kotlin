@@ -120,31 +120,17 @@ cp -a "$PREFIX/include/." "$INCLUDE_DEST/"
 cp -L "$OPENH264_PREFIX/lib/libopenh264.so.8" "$DEST/libopenh264.so.8"
 ln -sf libopenh264.so.8 "$DEST/libopenh264.so"
 
-NATIVE_LIBS=(
-  libavutil
-  libavcodec
-  libavformat
-  libavfilter
-  libswscale
-  libswresample
-)
-
-for lib in "${NATIVE_LIBS[@]}"; do
-  source="$(find "$PREFIX/lib" -maxdepth 1 -name "$lib.so*" | sort | head -n1)"
-  if [[ -z "$source" ]]; then
-    echo "Missing FFmpeg library: $lib"
-    find "$PREFIX/lib" -maxdepth 1 -name "$lib*" -printf "%f\n" | sort || true
+for lib in libavutil libavcodec libavformat libavfilter libswscale libswresample; do
+  source="$PREFIX/lib/$lib.so"
+  if [[ ! -f "$source" ]]; then
+    echo "Missing FFmpeg library: $source"
     exit 2
   fi
-  real="$(readlink -f "$source")"
-  test -f "$real"
-  filename="$(basename "$real")"
-  cp -L "$real" "$DEST/$filename"
-  ln -sf "$filename" "$DEST/$lib.so"
+  cp -L "$source" "$DEST/$lib.so"
 done
 
-echo "FFmpeg libraries available for linking:"
-find "$PREFIX/lib" -maxdepth 1 -name "lib*.so*" -printf "%f\n" | sort | head -80
+echo "Native libraries prepared:"
+ls -lh "$DEST"
 
 "$CXX" \
   -shared \
@@ -172,5 +158,4 @@ find "$PREFIX/lib" -maxdepth 1 -name "lib*.so*" -printf "%f\n" | sort | head -80
 
 "$STRIP" --strip-unneeded "$DEST/libvideofps.so"
 
-echo "Native libraries prepared:"
 ls -lh "$DEST"
