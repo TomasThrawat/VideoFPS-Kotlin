@@ -142,13 +142,14 @@ std::string processVideo(
 ) {
     g_cancel.store(false);
 
-    jclass listenerClass =
-        env->FindClass(
-            "com/hyouka/videofps/ProgressListener"
-        );
+    // Resolve the listener from the actual object instance.
+    // This avoids assuming the JVM binary name of the nested Kotlin interface.
+    jclass listenerClass = env->GetObjectClass(listener);
 
     if (!listenerClass) {
-        env->ExceptionClear();
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
         return "تعذر تجهيز مستمع التقدم";
     }
 
@@ -159,8 +160,12 @@ std::string processVideo(
             "(I)V"
         );
 
+    env->DeleteLocalRef(listenerClass);
+
     if (!progressMethod) {
-        env->ExceptionClear();
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
         return "تعذر تجهيز التقدم";
     }
 
