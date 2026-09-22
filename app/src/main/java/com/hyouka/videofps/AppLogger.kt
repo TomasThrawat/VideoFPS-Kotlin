@@ -48,10 +48,8 @@ object AppLogger {
         synchronized(lock) {
             val time = synchronized(formatter) { formatter.format(Date()) }
             val thread = Thread.currentThread().name
-            val suffix = throwable?.let { "
-" + it.stackTraceToString() } ?: ""
-            append("[$time] [$level] [$tag] [thread=$thread] $message$suffix
-")
+            val suffix = throwable?.let { "\n" + it.stackTraceToString() } ?: ""
+            append("[$time] [$level] [$tag] [thread=$thread] $message$suffix\n")
         }
     }
 
