@@ -101,10 +101,15 @@ jobs:
           test -n "$CLASS_FILE"
           CLASS_ROOT="$(dirname "$(dirname "$(dirname "$(dirname "$CLASS_FILE")")")")"
           javap -classpath "$CLASS_ROOT" -p -s com.hyouka.videofps.FpsProcessor | tee /tmp/fpsprocessor-javap.txt
-          grep -F 'process:(IIIJ)Ljava/lang/String;' /tmp/fpsprocessor-javap.txt
-          grep -F 'getNativeBuildId:()Ljava/lang/String;' /tmp/fpsprocessor-javap.txt
-          grep -F 'cancel:()V' /tmp/fpsprocessor-javap.txt
-          grep -F 'dispatchProgress:(I)V' /tmp/fpsprocessor-javap.txt
+          grep -F 'public final native java.lang.String process(int, int, int, long);' /tmp/fpsprocessor-javap.txt
+          grep -F 'descriptor: (IIIJ)Ljava/lang/String;' /tmp/fpsprocessor-javap.txt
+          grep -F 'public final native java.lang.String getNativeBuildId();' /tmp/fpsprocessor-javap.txt
+          grep -F 'descriptor: ()Ljava/lang/String;' /tmp/fpsprocessor-javap.txt
+          grep -F 'public final native void cancel();' /tmp/fpsprocessor-javap.txt
+          grep -F 'descriptor: ()V' /tmp/fpsprocessor-javap.txt
+          grep -F 'public static final void dispatchProgress(int);' /tmp/fpsprocessor-javap.txt
+          grep -F 'descriptor: (I)V' /tmp/fpsprocessor-javap.txt
+          strings app/src/main/jniLibs/arm64-v8a/libvideofps.so | grep -F '(IIIJ)Ljava/lang/String;'
 
       - name: Build debug APK
         run: |
