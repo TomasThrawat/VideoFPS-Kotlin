@@ -486,7 +486,7 @@ class MainActivity : Activity() {
         } else {
             inputName
         }
-        return "$base_${fps}fps.mp4"
+        return "${base}_${fps}fps.mp4"
     }
 
     private fun formatDuration(durationUs: Long): String {
