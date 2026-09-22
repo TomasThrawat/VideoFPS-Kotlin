@@ -1,0 +1,9 @@
+.gradle/
+.idea/
+local.properties
+**/build/
+.cxx/
+.externalNativeBuild/
+app/src/main/jniLibs/
+third_party/
+.work/
