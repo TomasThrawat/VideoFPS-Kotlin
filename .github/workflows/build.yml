@@ -88,7 +88,7 @@ jobs:
           strings app/src/main/jniLibs/arm64-v8a/libvideofps.so | grep -F "process"
           strings app/src/main/jniLibs/arm64-v8a/libvideofps.so | grep -F "getNativeBuildId"
           strings app/src/main/jniLibs/arm64-v8a/libvideofps.so | grep -F "cancel"
-          strings app/src/main/jniLibs/arm64-v8a/libvideofps.so | grep -F "jni-listener-diag-20260922-2"
+          strings app/src/main/jniLibs/arm64-v8a/libvideofps.so | grep -F "jni-process-primitive-20260922-3"
 
       - name: Run Android lint
         run: |
