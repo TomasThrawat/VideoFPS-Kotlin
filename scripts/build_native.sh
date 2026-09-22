@@ -6,7 +6,7 @@ OPENH264_VERSION="2.6.0"
 ANDROID_API="31"
 ABI="arm64-v8a"
 
-ROOT="$(cd "$"(dirname "$"{BASH_SOURCE[0]}"$)/.." && pwd)"
+ROOT="$PWD"
 WORK="${RUNNER_TEMP:-$ROOT/.work}"
 mkdir -p "$WORK"
 
@@ -57,15 +57,15 @@ ln -sf libopenh264.so.8 "$OPENH264_PREFIX/lib/libopenh264.so"
 
 cat > "$OPENH264_PREFIX/lib/pkgconfig/openh264.pc" <<EOF
 prefix=$OPENH264_PREFIX
-exec_prefix=${prefix}
-libdir=${prefix}/lib
-includedir=${prefix}/include
+exec_prefix=\${prefix}
+libdir=\${prefix}/lib
+includedir=\${prefix}/include
 
 Name: openh264
 Description: OpenH264 H.264 codec
 Version: $OPENH264_VERSION
-Libs: -L${libdir} -lopenh264
-Cflags: -I${includedir}
+Libs: -L\${libdir} -lopenh264
+Cflags: -I\${includedir}
 EOF
 
 if [[ ! -d "$FFMPEG_SRC" ]]; then
