@@ -102,7 +102,6 @@ make distclean >/dev/null 2>&1 || true
   --disable-doc \
   --disable-debug \
   --disable-network \
-  --disable-postproc \
   --disable-autodetect \
   --enable-pic \
   --enable-small \
