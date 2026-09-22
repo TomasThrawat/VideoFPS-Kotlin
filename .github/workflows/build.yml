@@ -1,0 +1,64 @@
+name: Build APK
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK and NDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/28.2.13676358" >> "$GITHUB_ENV"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.6.0"
+
+      - name: Build FFmpeg and OpenH264
+        run: |
+          chmod +x scripts/build_native.sh
+          scripts/build_native.sh
+
+      - name: Verify native libraries
+        run: |
+          set -e
+          test -f app/src/main/jniLibs/arm64-v8a/libvideofps.so
+          test -f app/src/main/jniLibs/arm64-v8a/libopenh264.so.8
+          test -f app/src/main/jniLibs/arm64-v8a/libavutil.so.61
+          test -f app/src/main/jniLibs/arm64-v8a/libavcodec.so.63
+          test -f app/src/main/jniLibs/arm64-v8a/libavformat.so.63
+          test -f app/src/main/jniLibs/arm64-v8a/libavfilter.so.12
+          test -f app/src/main/jniLibs/arm64-v8a/libswscale.so.10
+          test -f app/src/main/jniLibs/arm64-v8a/libswresample.so.7
+
+      - name: Build release APK
+        run: gradle --no-daemon --stacktrace assembleRelease
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: VideoFPS-Kotlin-release
+          path: app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
