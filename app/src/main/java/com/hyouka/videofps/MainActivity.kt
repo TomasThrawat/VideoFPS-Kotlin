@@ -28,7 +28,7 @@ class MainActivity : Activity() {
     }
 
     private var selectedUri: Uri? = null
-    private var selectedName = "video"
+    private var selectedName: String = "video"
     private var processRunning = false
     private var currentOutputUri: Uri? = null
 
@@ -37,19 +37,18 @@ class MainActivity : Activity() {
     private lateinit var button90: Button
     private lateinit var button120: Button
     private lateinit var cancelButton: Button
+    private lateinit var openButton: Button
     private lateinit var progressBar: ProgressBar
     private lateinit var statusText: TextView
     private lateinit var infoText: TextView
-    private lateinit var openButton: Button
 
-    private val executor: ExecutorService =
-        Executors.newSingleThreadExecutor()
+    private val executor: ExecutorService = Executors.newSingleThreadExecutor()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         buildUi()
-        setButtonsEnabled(false)
+        updateButtonStates()
     }
 
     override fun onDestroy() {
@@ -85,15 +84,7 @@ class MainActivity : Activity() {
 
         chooseButton = Button(this).apply {
             text = "اختيار فيديو"
-            setOnClickListener {
-                val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-                    addCategory(Intent.CATEGORY_OPENABLE)
-                    type = "video/*"
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
-                }
-                startActivityForResult(intent, PICK_VIDEO)
-            }
+            setOnClickListener { openVideoPicker() }
         }
         root.addView(chooseButton, lp(top = 24))
 
@@ -129,7 +120,7 @@ class MainActivity : Activity() {
         root.addView(progressBar, lp(top = 20))
 
         statusText = TextView(this).apply {
-            text = "اختار فيديو أولًا"
+            text = "اختار فيديو أولاً"
             textSize = 15f
             setTextColor(Color.LTGRAY)
             gravity = Gravity.CENTER
@@ -141,8 +132,8 @@ class MainActivity : Activity() {
             visibility = View.GONE
             setOnClickListener {
                 if (processRunning) {
+                    statusText.text = "جاري الإلغاء..."
                     FpsProcessor.cancel()
-                    statusText.text = "جاري إلغاء العملية..."
                 }
             }
         }
@@ -151,19 +142,7 @@ class MainActivity : Activity() {
         openButton = Button(this).apply {
             text = "فتح الفيديو الناتج"
             visibility = View.GONE
-            setOnClickListener {
-                val uri = currentOutputUri ?: return@setOnClickListener
-                try {
-                    startActivity(
-                        Intent(Intent.ACTION_VIEW).apply {
-                            setDataAndType(uri, "video/mp4")
-                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                        }
-                    )
-                } catch (_: Throwable) {
-                    statusText.text = "لا يوجد تطبيق لتشغيل الفيديو"
-                }
-            }
+            setOnClickListener { openCurrentOutput() }
         }
         root.addView(openButton, lp(top = 8))
 
@@ -177,30 +156,45 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun openVideoPicker() {
+        if (processRunning) return
+
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "video/*"
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+        startActivityForResult(intent, PICK_VIDEO)
+    }
+
     private fun startConversion(targetFps: Int) {
-        val input = selectedUri ?: return
+        val input = selectedUri ?: run {
+            statusText.text = "اختار فيديو أولاً"
+            return
+        }
+
         if (processRunning) return
 
         processRunning = true
-        setButtonsEnabled(false)
+        currentOutputUri = null
+        progressBar.progress = 0
+        statusText.text = "جاري تحويل الفيديو إلى $targetFps FPS..."
         cancelButton.visibility = View.VISIBLE
         openButton.visibility = View.GONE
-        progressBar.progress = 0
-        statusText.text = "بدء التحويل إلى $targetFps FPS..."
+        updateButtonStates()
 
         executor.execute {
             val result = runConversion(input, targetFps)
             runOnUiThread {
                 processRunning = false
                 cancelButton.visibility = View.GONE
-                if (result.success) {
-                    progressBar.progress = 100
-                }
+                progressBar.progress = if (result.success) 100 else 0
                 statusText.text = result.message
                 currentOutputUri = result.outputUri
                 openButton.visibility =
-                    if (result.success) View.VISIBLE else View.GONE
-                setButtonsEnabled(selectedUri != null)
+                    if (result.success && result.outputUri != null) View.VISIBLE else View.GONE
+                updateButtonStates()
             }
         }
     }
@@ -215,40 +209,17 @@ class MainActivity : Activity() {
 
         try {
             val metadata = readMetadata(inputUri)
-
-            if (metadata.durationUs <= 0L) {
-                return ConversionResult(
-                    false,
-                    "تعذر قراءة مدة الفيديو",
-                    null
-                )
-            }
-
             if (metadata.width <= 0 || metadata.height <= 0) {
-                return ConversionResult(
-                    false,
-                    "تعذر قراءة دقة الفيديو",
-                    null
-                )
+                return ConversionResult(false, "تعذر قراءة بيانات الفيديو", null)
             }
 
             if (metadata.width > 3840 || metadata.height > 2160) {
-                return ConversionResult(
-                    false,
-                    "الفيديو أعلى من 4K. الحد الأقصى 3840 × 2160",
-                    null
-                )
+                return ConversionResult(false, "الحد الأقصى حالياً 3840×2160", null)
             }
 
-            val inputPfd =
-                contentResolver.openFileDescriptor(inputUri, "r")
-                    ?: return ConversionResult(
-                        false,
-                        "تعذر فتح الفيديو",
-                        null
-                    )
-
-            inputFd = inputPfd.detachFd()
+            val descriptor = contentResolver.openFileDescriptor(inputUri, "r")
+                ?: return ConversionResult(false, "تعذر فتح ملف الفيديو", null)
+            inputFd = descriptor.detachFd()
 
             val values = ContentValues().apply {
                 put(
@@ -266,26 +237,14 @@ class MainActivity : Activity() {
             outputUri = contentResolver.insert(
                 MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
                 values
-            ) ?: return ConversionResult(
-                false,
-                "تعذر إنشاء ملف الإخراج",
-                null
-            )
+            ) ?: return ConversionResult(false, "تعذر إنشاء ملف الإخراج", null)
 
-            val outputPfd =
-                contentResolver.openFileDescriptor(outputUri, "w")
-
-            if (outputPfd == null) {
+            val outputDescriptor = contentResolver.openFileDescriptor(outputUri, "w")
+            if (outputDescriptor == null) {
                 contentResolver.delete(outputUri, null, null)
-                outputUri = null
-                return ConversionResult(
-                    false,
-                    "تعذر فتح ملف الإخراج",
-                    null
-                )
+                return ConversionResult(false, "تعذر فتح ملف الإخراج", null)
             }
-
-            outputFd = outputPfd.detachFd()
+            outputFd = outputDescriptor.detachFd()
 
             val error = FpsProcessor.process(
                 inputFd,
@@ -294,16 +253,19 @@ class MainActivity : Activity() {
                 metadata.durationUs
             ) { percent ->
                 runOnUiThread {
-                    progressBar.progress = percent
-                    statusText.text = "تحويل... $percent%"
+                    progressBar.progress = percent.coerceIn(0, 100)
+                    statusText.text = "جاري التحويل... $percent%"
                 }
             }
 
+            closeFd(inputFd)
             inputFd = -1
+            closeFd(outputFd)
             outputFd = -1
 
             if (error != null) {
                 contentResolver.delete(outputUri, null, null)
+                outputUri = null
                 return ConversionResult(false, error, null)
             }
 
@@ -318,7 +280,7 @@ class MainActivity : Activity() {
 
             return ConversionResult(
                 true,
-                "تم إنشاء فيديو $targetFps FPS في Movies/VideoFPS",
+                "تم التحويل إلى $targetFps FPS وحفظه في Movies/VideoFPS",
                 outputUri
             )
         } catch (t: Throwable) {
@@ -328,7 +290,6 @@ class MainActivity : Activity() {
                 } catch (_: Throwable) {
                 }
             }
-
             return ConversionResult(
                 false,
                 t.message ?: "حدث خطأ أثناء التحويل",
@@ -348,43 +309,16 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun setButtonsEnabled(enabled: Boolean) {
-        chooseButton.isEnabled = enabled && !processRunning
-        button60.isEnabled = enabled && !processRunning
-        button90.isEnabled = enabled && !processRunning
-        button120.isEnabled = enabled && !processRunning
+    private fun updateButtonStates() {
+        chooseButton.isEnabled = !processRunning
+
+        val canConvert = selectedUri != null && !processRunning
+        button60.isEnabled = canConvert
+        button90.isEnabled = canConvert
+        button120.isEnabled = canConvert
+
+        openButton.isEnabled = !processRunning && currentOutputUri != null
     }
-
-    private fun lp(
-        top: Int = 0
-    ): LinearLayout.LayoutParams {
-        return LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        ).also {
-            it.topMargin = top
-        }
-    }
-
-    private fun weightLp(): LinearLayout.LayoutParams {
-        return LinearLayout.LayoutParams(
-            0,
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-            1f
-        )
-    }
-
-    private data class VideoMetadata(
-        val width: Int,
-        val height: Int,
-        val durationUs: Long
-    )
-
-    private data class ConversionResult(
-        val success: Boolean,
-        val message: String,
-        val outputUri: Uri?
-    )
 
     private fun readMetadata(uri: Uri): VideoMetadata {
         val retriever = MediaMetadataRetriever()
@@ -413,14 +347,14 @@ class MainActivity : Activity() {
     private fun queryDisplayName(uri: Uri): String? {
         val cursor: Cursor? = contentResolver.query(
             uri,
-            arrayOf(MediaStore.MediaColumns.DISPLAY_NAME),
+            arrayOf(MediaStore.Video.Media.DISPLAY_NAME),
             null,
             null,
             null
         )
 
-        cursor.use {
-            if (it != null && it.moveToFirst()) {
+        cursor?.use {
+            if (it.moveToFirst()) {
                 return it.getString(0)
             }
         }
@@ -455,45 +389,80 @@ class MainActivity : Activity() {
 
         infoText.text = buildString {
             append(selectedName)
-
             if (metadata.width > 0 && metadata.height > 0) {
                 append("\n")
                 append(metadata.width)
                 append(" × ")
                 append(metadata.height)
             }
-
             if (metadata.durationUs > 0) {
                 append("\n")
                 append(formatDuration(metadata.durationUs))
             }
         }
 
-        progressBar.progress = 0
         currentOutputUri = null
         openButton.visibility = View.GONE
-        statusText.text = "الفيديو جاهز للتحويل"
-        setButtonsEnabled(true)
+        progressBar.progress = 0
+        statusText.text = "اختار 60 أو 90 أو 120 FPS"
+        updateButtonStates()
     }
 
-    private fun buildOutputName(
-        inputName: String,
-        fps: Int
-    ): String {
-        val dot = inputName.lastIndexOf('.')
-        val base = if (dot > 0) {
-            inputName.substring(0, dot)
-        } else {
-            inputName
+    private fun openCurrentOutput() {
+        val uri = currentOutputUri ?: return
+
+        try {
+            startActivity(
+                Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, "video/mp4")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+            )
+        } catch (t: Throwable) {
+            statusText.text = t.message ?: "تعذر فتح الفيديو الناتج"
         }
-        return "${base}_${fps}fps.mp4"
+    }
+
+    private fun buildOutputName(inputName: String, fps: Int): String {
+        val dot = inputName.lastIndexOf('.')
+        val base = if (dot > 0) inputName.substring(0, dot) else inputName
+        return base + "_" + fps + "fps.mp4"
     }
 
     private fun formatDuration(durationUs: Long): String {
         val totalSeconds = durationUs / 1_000_000L
-        val h = totalSeconds / 3600L
-        val m = (totalSeconds % 3600L) / 60L
-        val s = totalSeconds % 60L
-        return String.format("%02d:%02d:%02d", h, m, s)
+        val hours = totalSeconds / 3600L
+        val minutes = (totalSeconds % 3600L) / 60L
+        val seconds = totalSeconds % 60L
+        return String.format("%02d:%02d:%02d", hours, minutes, seconds)
     }
+
+    private fun lp(top: Int = 0): LinearLayout.LayoutParams {
+        return LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).also {
+            it.topMargin = top
+        }
+    }
+
+    private fun weightLp(): LinearLayout.LayoutParams {
+        return LinearLayout.LayoutParams(
+            0,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            1f
+        )
+    }
+
+    private data class VideoMetadata(
+        val width: Int,
+        val height: Int,
+        val durationUs: Long
+    )
+
+    private data class ConversionResult(
+        val success: Boolean,
+        val message: String,
+        val outputUri: Uri?
+    )
 }
