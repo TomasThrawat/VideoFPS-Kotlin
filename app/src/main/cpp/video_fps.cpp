@@ -21,7 +21,7 @@ extern "C" {
 
 namespace {
 
-constexpr const char* kNativeBuildId = "jni-listener-diag-20260922-2";
+constexpr const char* kNativeBuildId = "jni-process-primitive-20260922-3";
 
 void nativeLog(const char* level, const char* format, ...) {
     va_list args;
