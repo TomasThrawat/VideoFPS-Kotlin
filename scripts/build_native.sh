@@ -17,8 +17,8 @@ if [[ -z "$NDK_ROOT" ]]; then
 fi
 
 TOOLCHAIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64"
-CC="$TOOLCHAIN/bin/aarch64-linux-android${ANDROID_API}-clang"
-CXX="$TOOLCHAIN/bin/aarch64-linux-android${ANDROID_API}-clang++"
+CC="$TOOLCHAIN/bin/aarch64-linux-android31-clang"
+CXX="$TOOLCHAIN/bin/aarch64-linux-android31-clang++"
 AR="$TOOLCHAIN/bin/llvm-ar"
 RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
 STRIP="$TOOLCHAIN/bin/llvm-strip"
@@ -36,41 +36,34 @@ rm -rf "$PREFIX" "$OPENH264_PREFIX"
 mkdir -p "$PREFIX" "$OPENH264_PREFIX/include" "$OPENH264_PREFIX/lib/pkgconfig"
 
 if [[ ! -d "$OPENH264_SRC" ]]; then
-  git clone --depth 1 --branch "v$OPENH264_VERSION" \
-    https://github.com/cisco/openh264.git "$OPENH264_SRC"
+  git clone --depth 1 --branch "v$OPENH264_VERSION"     https://github.com/cisco/openh264.git "$OPENH264_SRC"
 fi
 
 cp -a "$OPENH264_SRC/codec/api/wels" "$OPENH264_PREFIX/include/"
 
-OPENH264_BZ2="$WORK/libopenh264-$OPENH264_VERSION-android-arm64.8.so.bz2"
 OPENH264_SO="$OPENH264_PREFIX/lib/libopenh264.so.8"
-
 if [[ ! -f "$OPENH264_SO" ]]; then
-  curl -L --fail --retry 3 \
-    "https://ciscobinary.openh264.org/libopenh264-$OPENH264_VERSION-android-arm64.8.so.bz2" \
-    -o "$OPENH264_BZ2"
-  bzip2 -dc "$OPENH264_BZ2" > "$OPENH264_SO"
+  curl -L --fail --retry 3     "https://ciscobinary.openh264.org/libopenh264-$OPENH264_VERSION-android-arm64.8.so.bz2"     -o "$WORK/openh264.bz2"
+  bzip2 -dc "$WORK/openh264.bz2" > "$OPENH264_SO"
 fi
 
 ln -sf libopenh264.so.8 "$OPENH264_PREFIX/lib/libopenh264.so"
 
 cat > "$OPENH264_PREFIX/lib/pkgconfig/openh264.pc" <<EOF
 prefix=$OPENH264_PREFIX
-exec_prefix=\${prefix}
-libdir=\${prefix}/lib
-includedir=\${prefix}/include
+exec_prefix=${prefix}
+libdir=${prefix}/lib
+includedir=${prefix}/include
 
 Name: openh264
 Description: OpenH264 H.264 codec
 Version: $OPENH264_VERSION
-Libs: -L\${libdir} -lopenh264
-Cflags: -I\${includedir}
+Libs: -L${libdir} -lopenh264
+Cflags: -I${includedir}
 EOF
 
 if [[ ! -d "$FFMPEG_SRC" ]]; then
-  curl -L --fail --retry 3 \
-    "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz" \
-    -o "$FFMPEG_TARBALL"
+  curl -L --fail --retry 3     "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz"     -o "$FFMPEG_TARBALL"
   tar -xf "$FFMPEG_TARBALL" -C "$WORK"
 fi
 
@@ -81,30 +74,7 @@ export PATH="$TOOLCHAIN/bin:$PATH"
 
 make distclean >/dev/null 2>&1 || true
 
-./configure \
-  --target-os=android \
-  --arch=aarch64 \
-  --cpu=armv8-a \
-  --enable-cross-compile \
-  --cc="$CC" \
-  --cxx="$CXX" \
-  --ar="$AR" \
-  --ranlib="$RANLIB" \
-  --strip="$STRIP" \
-  --sysroot="$TOOLCHAIN/sysroot" \
-  --prefix="$PREFIX" \
-  --libdir="$PREFIX/lib" \
-  --incdir="$PREFIX/include" \
-  --enable-shared \
-  --disable-static \
-  --disable-programs \
-  --disable-doc \
-  --disable-debug \
-  --disable-network \
-  --disable-autodetect \
-  --enable-pic \
-  --enable-small \
-  --enable-libopenh264
+./configure   --target-os=android   --arch=aarch64   --cpu=armv8-a   --enable-cross-compile   --cc="$CC"   --cxx="$CXX"   --ar="$AR"   --ranlib="$RANLIB"   --strip="$STRIP"   --sysroot="$TOOLCHAIN/sysroot"   --prefix="$PREFIX"   --libdir="$PREFIX/lib"   --incdir="$PREFIX/include"   --enable-shared   --disable-static   --disable-programs   --disable-doc   --disable-debug   --disable-network   --disable-autodetect   --enable-pic   --enable-small   --enable-libopenh264
 
 make -j"$(nproc)"
 make install
@@ -122,40 +92,17 @@ ln -sf libopenh264.so.8 "$DEST/libopenh264.so"
 
 for lib in libavutil libavcodec libavformat libavfilter libswscale libswresample; do
   source="$PREFIX/lib/$lib.so"
-  if [[ ! -f "$source" ]]; then
-    echo "Missing FFmpeg library: $source"
-    exit 2
-  fi
+  test -f "$source"
   cp -L "$source" "$DEST/$lib.so"
 done
 
-echo "Native libraries prepared:"
-ls -lh "$DEST"
-
-"$CXX" \
-  -shared \
-  -fPIC \
-  -O3 \
-  -std=c++17 \
-  -I"$INCLUDE_DEST" \
-  "$ROOT/app/src/main/cpp/video_fps.cpp" \
-  "$PREFIX/lib/libavfilter.so" \
-  "$PREFIX/lib/libavformat.so" \
-  "$PREFIX/lib/libavcodec.so" \
-  "$PREFIX/lib/libswscale.so" \
-  "$PREFIX/lib/libswresample.so" \
-  "$PREFIX/lib/libavutil.so" \
-  "$OPENH264_PREFIX/lib/libopenh264.so.8" \
-  -Wl,-soname,libvideofps.so \
-  -Wl,-rpath-link,"$PREFIX/lib" \
-  -Wl,-rpath-link,"$OPENH264_PREFIX/lib" \
-  -llog \
-  -landroid \
-  -lz \
-  -ldl \
-  -lm \
-  -o "$DEST/libvideofps.so"
+"$CXX"   -shared   -fPIC   -O3   -std=c++17   -static-libstdc++   -I"$INCLUDE_DEST"   "$ROOT/app/src/main/cpp/video_fps.cpp"   "$PREFIX/lib/libavfilter.so"   "$PREFIX/lib/libavformat.so"   "$PREFIX/lib/libavcodec.so"   "$PREFIX/lib/libswscale.so"   "$PREFIX/lib/libswresample.so"   "$PREFIX/lib/libavutil.so"   "$OPENH264_PREFIX/lib/libopenh264.so.8"   -Wl,-soname,libvideofps.so   -Wl,-rpath-link,"$PREFIX/lib"   -Wl,-rpath-link,"$OPENH264_PREFIX/lib"   -llog -lz -ldl -lm   -o "$DEST/libvideofps.so"
 
 "$STRIP" --strip-unneeded "$DEST/libvideofps.so"
+
+if readelf -d "$DEST/libvideofps.so" | grep -Fq "libc++_shared.so"; then
+  echo "Unexpected shared libc++ dependency"
+  exit 3
+fi
 
 ls -lh "$DEST"
