@@ -13,10 +13,10 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Setup JDK
-        uses: actions/setup-java@v6
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
@@ -55,11 +55,13 @@ jobs:
           path: |
             app/src/main/jniLibs/arm64-v8a
             app/src/main/cpp/ffmpeg/include
-          key: native-ffmpeg-9.0.2-openh264-2.6.0-ndk-28.2.13676358-arm64-v8a-v4
+          key: native-ffmpeg-9.0.2-openh264-2.6.0-ndk-28.2.13676358-arm64-v8a-v5
 
       - name: Build FFmpeg and OpenH264
         run: |
-          if [[ -f app/src/main/jniLibs/arm64-v8a/libvideofps.so &&                 -f app/src/main/jniLibs/arm64-v8a/libavutil.so &&                 -f app/src/main/jniLibs/arm64-v8a/libc++_shared.so ]]; then
+          if [[ -f app/src/main/jniLibs/arm64-v8a/libvideofps.so &&
+                -f app/src/main/jniLibs/arm64-v8a/libavutil.so &&
+                -f app/src/main/jniLibs/arm64-v8a/libc++_shared.so ]]; then
             echo "Using cached native libraries."
           else
             chmod +x scripts/build_native.sh
@@ -96,7 +98,7 @@ jobs:
           ls -lh app/build/outputs/apk/debug/app-debug.apk
 
       - name: Upload APK
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v4
         with:
           name: VideoFPS-Kotlin-debug
           path: app/build/outputs/apk/debug/app-debug.apk
