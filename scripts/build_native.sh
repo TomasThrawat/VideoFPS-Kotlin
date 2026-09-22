@@ -58,8 +58,8 @@ includedir=$OPENH264_PREFIX/include
 Name: openh264
 Description: OpenH264 H.264 codec
 Version: $OPENH264_VERSION
-Libs: -L${libdir} -lopenh264
-Cflags: -I${includedir}
+Libs: -L$OPENH264_PREFIX/lib -lopenh264
+Cflags: -I$OPENH264_PREFIX/include
 EOF
 
 if [[ ! -d "$FFMPEG_SRC" ]]; then
