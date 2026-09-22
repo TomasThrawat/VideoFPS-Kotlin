@@ -131,18 +131,22 @@ NATIVE_LIBS=(
 )
 
 for lib in "${NATIVE_LIBS[@]}"; do
-  source="$(find "$PREFIX/lib" -maxdepth 1 -type f -name "$lib.so.*" | sort | head -n1)"
-  if [[ -z "$source" ]]; then
-    source="$(find "$PREFIX/lib" -maxdepth 1 -type l -name "$lib.so*" | sort | head -n1)"
-  fi
+  source="$(find "$PREFIX/lib" -maxdepth 1 -name "$lib.so*" | sort | head -n1)"
   if [[ -z "$source" ]]; then
     echo "Missing FFmpeg library: $lib"
     echo "Installed library files:"
     find "$PREFIX/lib" -maxdepth 1 -name "$lib.so*" -printf "%f\n" | sort || true
     exit 2
   fi
-  filename="$(basename "$source")"
-  cp -L "$source" "$DEST/$filename"
+
+  real="$(readlink -f "$source")"
+  if [[ -z "$real" || ! -f "$real" ]]; then
+    echo "Invalid FFmpeg library target: $source"
+    exit 2
+  fi
+
+  filename="$(basename "$real")"
+  cp -L "$real" "$DEST/$filename"
   ln -sf "$filename" "$DEST/$lib.so"
 done
 
