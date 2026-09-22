@@ -37,8 +37,7 @@ mkdir -p "$PREFIX" "$OPENH264_PREFIX/include" "$OPENH264_PREFIX/lib/pkgconfig"
 
 if [[ ! -d "$OPENH264_SRC" ]]; then
   git clone --depth 1 --branch "v$OPENH264_VERSION" \
-    https://github.com/cisco/openh264.git \
-    "$OPENH264_SRC"
+    https://github.com/cisco/openh264.git "$OPENH264_SRC"
 fi
 
 cp -a "$OPENH264_SRC/codec/api/wels" "$OPENH264_PREFIX/include/"
@@ -134,21 +133,18 @@ for lib in "${NATIVE_LIBS[@]}"; do
   source="$(find "$PREFIX/lib" -maxdepth 1 -name "$lib.so*" | sort | head -n1)"
   if [[ -z "$source" ]]; then
     echo "Missing FFmpeg library: $lib"
-    echo "Installed library files:"
-    find "$PREFIX/lib" -maxdepth 1 -name "$lib.so*" -printf "%f\n" | sort || true
+    find "$PREFIX/lib" -maxdepth 1 -name "$lib*" -printf "%f\n" | sort || true
     exit 2
   fi
-
   real="$(readlink -f "$source")"
-  if [[ -z "$real" || ! -f "$real" ]]; then
-    echo "Invalid FFmpeg library target: $source"
-    exit 2
-  fi
-
+  test -f "$real"
   filename="$(basename "$real")"
   cp -L "$real" "$DEST/$filename"
   ln -sf "$filename" "$DEST/$lib.so"
 done
+
+echo "FFmpeg libraries available for linking:"
+find "$PREFIX/lib" -maxdepth 1 -name "lib*.so*" -printf "%f\n" | sort | head -80
 
 "$CXX" \
   -shared \
@@ -156,18 +152,17 @@ done
   -O3 \
   -std=c++17 \
   -I"$INCLUDE_DEST" \
-  -L"$DEST" \
   "$ROOT/app/src/main/cpp/video_fps.cpp" \
-  -Wl,--no-as-needed \
+  "$PREFIX/lib/libavfilter.so" \
+  "$PREFIX/lib/libavformat.so" \
+  "$PREFIX/lib/libavcodec.so" \
+  "$PREFIX/lib/libswscale.so" \
+  "$PREFIX/lib/libswresample.so" \
+  "$PREFIX/lib/libavutil.so" \
+  "$OPENH264_PREFIX/lib/libopenh264.so.8" \
   -Wl,-soname,libvideofps.so \
-  -lavfilter \
-  -lavformat \
-  -lavcodec \
-  -lswscale \
-  -lswresample \
-  -lavutil \
-  -L"$OPENH264_PREFIX/lib" \
-  -lopenh264 \
+  -Wl,-rpath-link,"$PREFIX/lib" \
+  -Wl,-rpath-link,"$OPENH264_PREFIX/lib" \
   -llog \
   -landroid \
   -lz \
