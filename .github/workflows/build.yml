@@ -50,35 +50,47 @@ jobs:
         with:
           gradle-version: "9.6.0"
 
+      - name: Restore native library cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            app/src/main/jniLibs/arm64-v8a
+            app/src/main/cpp/ffmpeg/include
+          key: native-ffmpeg-9.0.2-openh264-2.6.0-ndk-28.2.13676358-arm64-v8a
+
       - name: Build FFmpeg and OpenH264
         run: |
-          chmod +x scripts/build_native.sh
-          scripts/build_native.sh
+          if [[ -f app/src/main/jniLibs/arm64-v8a/libvideofps.so && -f app/src/main/jniLibs/arm64-v8a/libavutil.so ]]; then
+            echo "Using cached native libraries."
+          else
+            chmod +x scripts/build_native.sh
+            scripts/build_native.sh
+          fi
 
       - name: Verify native libraries
         run: |
           set -e
-          test -f app/src/main/jniLibs/arm64-v8a/libvideofps.so
-          test -f app/src/main/jniLibs/arm64-v8a/libopenh264.so.8
-          test -f app/src/main/jniLibs/arm64-v8a/libavutil.so
-          test -f app/src/main/jniLibs/arm64-v8a/libavcodec.so
-          test -f app/src/main/jniLibs/arm64-v8a/libavformat.so
-          test -f app/src/main/jniLibs/arm64-v8a/libavfilter.so
-          test -f app/src/main/jniLibs/arm64-v8a/libswscale.so
-          test -f app/src/main/jniLibs/arm64-v8a/libswresample.so
+          test -s app/src/main/jniLibs/arm64-v8a/libvideofps.so
+          test -s app/src/main/jniLibs/arm64-v8a/libopenh264.so.8
+          test -s app/src/main/jniLibs/arm64-v8a/libavutil.so
+          test -s app/src/main/jniLibs/arm64-v8a/libavcodec.so
+          test -s app/src/main/jniLibs/arm64-v8a/libavformat.so
+          test -s app/src/main/jniLibs/arm64-v8a/libavfilter.so
+          test -s app/src/main/jniLibs/arm64-v8a/libswscale.so
+          test -s app/src/main/jniLibs/arm64-v8a/libswresample.so
 
-      - name: Build release APK
-        run: gradle --no-daemon --stacktrace assembleRelease
+      - name: Build debug APK
+        run: gradle --no-daemon --stacktrace assembleDebug
 
       - name: Verify APK
         run: |
           set -e
-          test -s app/build/outputs/apk/release/app-release.apk
-          ls -lh app/build/outputs/apk/release/app-release.apk
+          test -s app/build/outputs/apk/debug/app-debug.apk
+          ls -lh app/build/outputs/apk/debug/app-debug.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: VideoFPS-Kotlin-release
-          path: app/build/outputs/apk/release/app-release.apk
+          name: VideoFPS-Kotlin-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
