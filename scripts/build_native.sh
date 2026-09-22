@@ -78,7 +78,8 @@ make distclean >/dev/null 2>&1 || true
 
 ./configure   --target-os=android   --arch=aarch64   --cpu=armv8-a   --enable-cross-compile   --cc="$CC"   --cxx="$CXX"   --ar="$AR"   --ranlib="$RANLIB"   --strip="$STRIP"   --sysroot="$TOOLCHAIN/sysroot"   --prefix="$PREFIX"   --libdir="$PREFIX/lib"   --incdir="$PREFIX/include"   --enable-shared   --disable-static   --disable-programs   --disable-doc   --disable-debug   --disable-network   --disable-autodetect   --enable-pic   --enable-small   --enable-libopenh264   --extra-cflags="-Wno-implicit-fallthrough -Wno-unused-function"
 
-make -j"$(nproc)"
+FFMPEG_CFLAGS="$(sed -n 's/^CFLAGS=//p' ffbuild/config.mak)"
+make -j"$(nproc)" CFLAGS="$FFMPEG_CFLAGS -Wno-implicit-fallthrough -Wno-unused-function"
 make install
 popd >/dev/null
 
