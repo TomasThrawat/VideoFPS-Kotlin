@@ -59,14 +59,14 @@ jobs:
           path: |
             app/src/main/jniLibs/arm64-v8a
             app/src/main/cpp/ffmpeg/include
-          key: native-ffmpeg-9.0.2-openh264-2.6.0-ndk-28.2.13676358-arm64-v8a-v8-${{ hashFiles("app/src/main/cpp/**/*.cpp", "scripts/build_native.sh") }}
+          key: native-ffmpeg-9.0.2-openh264-2.6.0-ndk-28.2.13676358-arm64-v8a-v8-${{ hashFiles('app/src/main/cpp/**/*.cpp', 'scripts/build_native.sh') }}
 
       - name: Build FFmpeg and OpenH264
         run: |
           if [[ -f app/src/main/jniLibs/arm64-v8a/libvideofps.so &&
                 -f app/src/main/jniLibs/arm64-v8a/libavutil.so &&
                 -f app/src/main/jniLibs/arm64-v8a/libc++_shared.so ]]; then
-            echo "Using cached native libraries."
+            echo "Using cached native libraries for the current native-source hash."
           else
             chmod +x scripts/build_native.sh
             scripts/build_native.sh
@@ -84,6 +84,10 @@ jobs:
           test -s app/src/main/jniLibs/arm64-v8a/libavfilter.so
           test -s app/src/main/jniLibs/arm64-v8a/libswscale.so
           test -s app/src/main/jniLibs/arm64-v8a/libswresample.so
+          readelf -Ws app/src/main/jniLibs/arm64-v8a/libvideofps.so | grep -F "Java_com_hyouka_videofps_FpsProcessor_process"
+          readelf -Ws app/src/main/jniLibs/arm64-v8a/libvideofps.so | grep -F "Java_com_hyouka_videofps_FpsProcessor_getNativeBuildId"
+          readelf -Ws app/src/main/jniLibs/arm64-v8a/libvideofps.so | grep -F "Java_com_hyouka_videofps_FpsProcessor_cancel"
+          strings app/src/main/jniLibs/arm64-v8a/libvideofps.so | grep -F "jni-listener-diag-20260922-2"
 
       - name: Run Android lint
         run: |
