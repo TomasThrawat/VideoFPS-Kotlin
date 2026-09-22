@@ -215,17 +215,31 @@ class MainActivity : Activity() {
 
         try {
             val metadata = readMetadata(inputUri)
+            AppLogger.i(
+                "Conversion",
+                "Metadata width=" + metadata.width +
+                    " height=" + metadata.height +
+                    " durationUs=" + metadata.durationUs +
+                    " durationMs=" + (metadata.durationUs / 1000L) +
+                    " inputUri=" + inputUri
+            )
             if (metadata.width <= 0 || metadata.height <= 0) {
+                AppLogger.e("Conversion", "Invalid metadata dimensions")
                 return ConversionResult(false, "تعذر قراءة بيانات الفيديو", null)
             }
 
             if (metadata.width > 3840 || metadata.height > 2160) {
+                AppLogger.e(
+                    "Conversion",
+                    "Rejected video dimensions=" + metadata.width + "x" + metadata.height
+                )
                 return ConversionResult(false, "الحد الأقصى حالياً 3840×2160", null)
             }
 
             val descriptor = contentResolver.openFileDescriptor(inputUri, "r")
                 ?: return ConversionResult(false, "تعذر فتح ملف الفيديو", null)
             inputFd = descriptor.detachFd()
+            AppLogger.i("Conversion", "Input FD detached=" + inputFd)
 
             val values = ContentValues().apply {
                 put(
@@ -245,14 +259,49 @@ class MainActivity : Activity() {
                 values
             ) ?: return ConversionResult(false, "تعذر إنشاء ملف الإخراج", null)
 
+            AppLogger.i(
+                "Conversion",
+                "Output URI created=" + outputUri +
+                    " displayName=" + buildOutputName(selectedName, targetFps)
+            )
+
             val outputDescriptor = contentResolver.openFileDescriptor(outputUri, "w")
             if (outputDescriptor == null) {
+                AppLogger.e("Conversion", "Output ParcelFileDescriptor is null")
                 contentResolver.delete(outputUri, null, null)
                 return ConversionResult(false, "تعذر فتح ملف الإخراج", null)
             }
             outputFd = outputDescriptor.detachFd()
+            AppLogger.i("Conversion", "Output FD detached=" + outputFd)
 
-            AppLogger.i("Native", "Calling FpsProcessor.process")
+            val listener = object : FpsProcessor.ProgressListener {
+                override fun onProgress(percent: Int) {
+                    runOnUiThread {
+                        progressBar.progress = percent.coerceIn(0, 100)
+                        statusText.text = "جاري التحويل... $percent%"
+                    }
+                }
+            }
+            AppLogger.i(
+                "Native",
+                "Preparing listener class=" + listener.javaClass.name +
+                    " identity=" + System.identityHashCode(listener)
+            )
+            AppLogger.i(
+                "Native",
+                "Calling FpsProcessor.process inputFd=" + inputFd +
+                    " outputFd=" + outputFd +
+                    " targetFps=" + targetFps +
+                    " durationUs=" + metadata.durationUs
+            )
+
+            val error = FpsProcessor.process(
+                inputFd,
+                outputFd,
+                targetFps,
+                metadata.durationUs,
+                listener
+            )
             val error = FpsProcessor.process(
                 inputFd,
                 outputFd,
@@ -273,7 +322,12 @@ class MainActivity : Activity() {
             closeFd(outputFd)
             outputFd = -1
 
-            AppLogger.i("Native", "FpsProcessor.process returned: " + (error ?: "success"))
+            AppLogger.i(
+                "Native",
+                "FpsProcessor.process returned=" + (error ?: "success") +
+                    " inputFdWas=" + inputFd +
+                    " outputFdWas=" + outputFd
+            )
             if (error != null) {
                 AppLogger.e("Conversion", "Conversion failed: " + error)
                 contentResolver.delete(outputUri, null, null)
@@ -296,6 +350,12 @@ class MainActivity : Activity() {
                 outputUri
             )
         } catch (t: Throwable) {
+            AppLogger.e(
+                "Conversion",
+                "runConversion exception type=" + t.javaClass.name +
+                    " message=" + (t.message ?: "<null>"),
+                t
+            )
             if (outputUri != null) {
                 try {
                     contentResolver.delete(outputUri, null, null)
