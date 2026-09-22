@@ -35,6 +35,8 @@ FFMPEG_SRC="$WORK/ffmpeg-$FFMPEG_VERSION"
 rm -rf "$PREFIX" "$OPENH264_PREFIX"
 mkdir -p "$PREFIX" "$OPENH264_PREFIX/include" "$OPENH264_PREFIX/lib/pkgconfig"
 
+git config --global init.defaultBranch main
+
 if [[ ! -d "$OPENH264_SRC" ]]; then
   git clone --depth 1 --branch "v$OPENH264_VERSION" https://github.com/cisco/openh264.git "$OPENH264_SRC"
 fi
