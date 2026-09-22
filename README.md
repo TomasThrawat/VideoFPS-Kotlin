@@ -8,7 +8,13 @@
 - حفظ الناتج في Movies/VideoFPS.
 - معالجة محلية على الجهاز.
 - لا ينشئ logs داخل Download.
+- بناء arm64-v8a.
 
-الإصدار الحالي مبني لـ arm64-v8a ويحافظ على الدقة حتى 3840×2160.
+## Build
+
+GitHub Actions يبني FFmpeg وOpenH264 ثم يبني APK Release.
+
+الناتج:
+app/build/outputs/apk/release/app-release.apk
 
 راجع THIRD_PARTY_LICENSES.md للمكونات الخارجية.
