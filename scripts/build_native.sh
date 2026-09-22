@@ -36,14 +36,14 @@ rm -rf "$PREFIX" "$OPENH264_PREFIX"
 mkdir -p "$PREFIX" "$OPENH264_PREFIX/include" "$OPENH264_PREFIX/lib/pkgconfig"
 
 if [[ ! -d "$OPENH264_SRC" ]]; then
-  git clone --depth 1 --branch "v$OPENH264_VERSION"     https://github.com/cisco/openh264.git "$OPENH264_SRC"
+  git clone --depth 1 --branch "v$OPENH264_VERSION" https://github.com/cisco/openh264.git "$OPENH264_SRC"
 fi
 
 cp -a "$OPENH264_SRC/codec/api/wels" "$OPENH264_PREFIX/include/"
 
 OPENH264_SO="$OPENH264_PREFIX/lib/libopenh264.so.8"
 if [[ ! -f "$OPENH264_SO" ]]; then
-  curl -L --fail --retry 3     "https://ciscobinary.openh264.org/libopenh264-$OPENH264_VERSION-android-arm64.8.so.bz2"     -o "$WORK/openh264.bz2"
+  curl -L --fail --retry 3 "https://ciscobinary.openh264.org/libopenh264-$OPENH264_VERSION-android-arm64.8.so.bz2" -o "$WORK/openh264.bz2"
   bzip2 -dc "$WORK/openh264.bz2" > "$OPENH264_SO"
 fi
 
@@ -63,7 +63,7 @@ Cflags: -I${includedir}
 EOF
 
 if [[ ! -d "$FFMPEG_SRC" ]]; then
-  curl -L --fail --retry 3     "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz"     -o "$FFMPEG_TARBALL"
+  curl -L --fail --retry 3 "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VERSION.tar.xz" -o "$FFMPEG_TARBALL"
   tar -xf "$FFMPEG_TARBALL" -C "$WORK"
 fi
 
@@ -96,13 +96,11 @@ for lib in libavutil libavcodec libavformat libavfilter libswscale libswresample
   cp -L "$source" "$DEST/$lib.so"
 done
 
-"$CXX"   -shared   -fPIC   -O3   -std=c++17   -static-libstdc++   -I"$INCLUDE_DEST"   "$ROOT/app/src/main/cpp/video_fps.cpp"   "$PREFIX/lib/libavfilter.so"   "$PREFIX/lib/libavformat.so"   "$PREFIX/lib/libavcodec.so"   "$PREFIX/lib/libswscale.so"   "$PREFIX/lib/libswresample.so"   "$PREFIX/lib/libavutil.so"   "$OPENH264_PREFIX/lib/libopenh264.so.8"   -Wl,-soname,libvideofps.so   -Wl,-rpath-link,"$PREFIX/lib"   -Wl,-rpath-link,"$OPENH264_PREFIX/lib"   -llog -lz -ldl -lm   -o "$DEST/libvideofps.so"
+LIBCXX_SHARED="$TOOLCHAIN/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
+test -s "$LIBCXX_SHARED"
+cp -L "$LIBCXX_SHARED" "$DEST/libc++_shared.so"
+
+"$CXX"   -shared   -fPIC   -O3   -std=c++17   -I"$INCLUDE_DEST"   "$ROOT/app/src/main/cpp/video_fps.cpp"   "$PREFIX/lib/libavfilter.so"   "$PREFIX/lib/libavformat.so"   "$PREFIX/lib/libavcodec.so"   "$PREFIX/lib/libswscale.so"   "$PREFIX/lib/libswresample.so"   "$PREFIX/lib/libavutil.so"   "$OPENH264_PREFIX/lib/libopenh264.so.8"   -Wl,-soname,libvideofps.so   -Wl,-rpath-link,"$PREFIX/lib"   -Wl,-rpath-link,"$OPENH264_PREFIX/lib"   -llog -lz -ldl -lm   -o "$DEST/libvideofps.so"
 
 "$STRIP" --strip-unneeded "$DEST/libvideofps.so"
-
-if readelf -d "$DEST/libvideofps.so" | grep -Fq "libc++_shared.so"; then
-  echo "Unexpected shared libc++ dependency"
-  exit 3
-fi
-
 ls -lh "$DEST"
