@@ -51,9 +51,9 @@ ln -sf libopenh264.so.8 "$OPENH264_PREFIX/lib/libopenh264.so"
 
 cat > "$OPENH264_PREFIX/lib/pkgconfig/openh264.pc" <<EOF
 prefix=$OPENH264_PREFIX
-exec_prefix=${prefix}
-libdir=${prefix}/lib
-includedir=${prefix}/include
+exec_prefix=$OPENH264_PREFIX
+libdir=$OPENH264_PREFIX/lib
+includedir=$OPENH264_PREFIX/include
 
 Name: openh264
 Description: OpenH264 H.264 codec
