@@ -55,7 +55,7 @@ jobs:
           path: |
             app/src/main/jniLibs/arm64-v8a
             app/src/main/cpp/ffmpeg/include
-          key: native-ffmpeg-9.0.2-openh264-2.6.0-ndk-28.2.13676358-arm64-v8a-v3
+          key: native-ffmpeg-9.0.2-openh264-2.6.0-ndk-28.2.13676358-arm64-v8a-v4
 
       - name: Build FFmpeg and OpenH264
         run: |
@@ -66,21 +66,19 @@ jobs:
             scripts/build_native.sh
           fi
 
-      - name: Package NDK libc++ shared runtime
+      - name: Verify native linker dependencies
         run: |
           set -e
-          NDK="$ANDROID_NDK_ROOT"
-          LIBCXX="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
-          test -s "$LIBCXX"
-          mkdir -p app/src/main/jniLibs/arm64-v8a
-          cp -L "$LIBCXX" app/src/main/jniLibs/arm64-v8a/libc++_shared.so
-          ls -lh app/src/main/jniLibs/arm64-v8a/libc++_shared.so
+          readelf -d app/src/main/jniLibs/arm64-v8a/libvideofps.so
+          if readelf -d app/src/main/jniLibs/arm64-v8a/libvideofps.so | grep -Fq "libc++_shared.so"; then
+            echo "libvideofps.so still depends on libc++_shared.so"
+            exit 3
+          fi
 
       - name: Verify native libraries
         run: |
           set -e
           test -s app/src/main/jniLibs/arm64-v8a/libvideofps.so
-          test -s app/src/main/jniLibs/arm64-v8a/libc++_shared.so
           test -s app/src/main/jniLibs/arm64-v8a/libopenh264.so.8
           test -s app/src/main/jniLibs/arm64-v8a/libavutil.so
           test -s app/src/main/jniLibs/arm64-v8a/libavcodec.so
@@ -101,8 +99,11 @@ jobs:
         run: |
           set -e
           test -s app/build/outputs/apk/debug/app-debug.apk
-          unzip -l app/build/outputs/apk/debug/app-debug.apk | grep -F "lib/arm64-v8a/libc++_shared.so"
           unzip -l app/build/outputs/apk/debug/app-debug.apk | grep -F "lib/arm64-v8a/libvideofps.so"
+          if unzip -l app/build/outputs/apk/debug/app-debug.apk | grep -Fq "lib/arm64-v8a/libc++_shared.so"; then
+            echo "Unexpected libc++_shared.so packaged"
+            exit 3
+          fi
           ls -lh app/build/outputs/apk/debug/app-debug.apk
 
       - name: Upload APK
