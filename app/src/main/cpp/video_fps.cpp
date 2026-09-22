@@ -50,14 +50,18 @@ std::string ffError(int code) {
 
 void reportProgress(
     JNIEnv* env,
-    jobject listener,
+    jclass processorClass,
     jmethodID method,
     int value
 ) {
-    if (!env || !listener || !method) return;
+    if (!env || !processorClass || !method) return;
 
     value = std::clamp(value, 0, 100);
-    env->CallVoidMethod(listener, method, static_cast<jint>(value));
+    env->CallStaticVoidMethod(
+        processorClass,
+        method,
+        static_cast<jint>(value)
+    );
 
     if (env->ExceptionCheck()) {
         env->ExceptionClear();
@@ -158,67 +162,60 @@ std::string processVideo(
     int outputFd,
     int targetFps,
     int64_t durationUs,
-    JNIEnv* env,
-    jobject listener
+    JNIEnv* env
 ) {
     g_cancel.store(false);
 
     nativeLog(
         "I",
-        "processVideo start inputFd=%d outputFd=%d targetFps=%d durationUs=%lld listener=%p",
+        "processVideo start inputFd=%d outputFd=%d targetFps=%d durationUs=%lld",
         inputFd,
         outputFd,
         targetFps,
-        static_cast<long long>(durationUs),
-        static_cast<void*>(listener)
+        static_cast<long long>(durationUs)
     );
 
-    // Resolve the listener from the actual object instance.
-    // This avoids assuming the JVM binary name of the nested Kotlin interface.
-    nativeLog("I", "Calling GetObjectClass(listener)");
-    jclass listenerClass = env->GetObjectClass(listener);
+    nativeLog("I", "Resolving FpsProcessor.dispatchProgress(I)V");
+    jclass processorClass =
+        env->FindClass("com/hyouka/videofps/FpsProcessor");
 
-    if (!listenerClass) {
+    if (!processorClass) {
         const bool hasException = env->ExceptionCheck();
         nativeLog(
             "E",
-            "GetObjectClass(listener) returned NULL exception=%s",
+            "FindClass(FpsProcessor) failed exception=%s",
             hasException ? "yes" : "no"
         );
         if (hasException) {
             env->ExceptionDescribe();
             env->ExceptionClear();
         }
-        return "تعذر تجهيز مستمع التقدم: GetObjectClass فشل";
+        return "تعذر تجهيز مستمع التقدم: FpsProcessor class غير موجود";
     }
 
-    nativeLog("I", "GetObjectClass(listener) succeeded");
-
-    nativeLog("I", "Calling GetMethodID(onProgress,(I)V)");
     jmethodID progressMethod =
-        env->GetMethodID(
-            listenerClass,
-            "onProgress",
+        env->GetStaticMethodID(
+            processorClass,
+            "dispatchProgress",
             "(I)V"
         );
-
-    env->DeleteLocalRef(listenerClass);
 
     if (!progressMethod) {
         const bool hasException = env->ExceptionCheck();
         nativeLog(
             "E",
-            "GetMethodID(onProgress,(I)V) returned NULL exception=%s",
+            "GetStaticMethodID(dispatchProgress,(I)V) failed exception=%s",
             hasException ? "yes" : "no"
         );
         if (hasException) {
             env->ExceptionDescribe();
             env->ExceptionClear();
         }
-        return "تعذر تجهيز التقدم: onProgress(I)V غير موجود";
+        env->DeleteLocalRef(processorClass);
+        return "تعذر تجهيز مستمع التقدم: dispatchProgress(I)V غير موجود";
     }
 
-    nativeLog("I", "Progress listener method resolved successfully");
+    nativeLog("I", "Progress dispatcher resolved successfully");
 
     const std::string inputPath =
         "/proc/self/fd/" + std::to_string(inputFd);
@@ -826,7 +823,7 @@ std::string processVideo(
                         if (percent != lastProgress) {
                             reportProgress(
                                 env,
-                                listener,
+                                processorClass,
                                 progressMethod,
                                 percent
                             );
@@ -1002,7 +999,7 @@ std::string processVideo(
         nativeLog("I", "Pipeline completed; reporting 100%%");
         reportProgress(
             env,
-            listener,
+            processorClass,
             progressMethod,
             100
         );
@@ -1028,6 +1025,8 @@ std::string processVideo(
     close(inputFd);
     close(outputFd);
 
+    env->DeleteLocalRef(processorClass);
+
     nativeLog(
         error.empty() ? "I" : "E",
         "processVideo end error=%s",
@@ -1052,8 +1051,7 @@ static jstring nativeProcess(
     jint inputFd,
     jint outputFd,
     jint targetFps,
-    jlong durationUs,
-    jobject listener
+    jlong durationUs
 ) {
     __android_log_print(
         ANDROID_LOG_INFO,
@@ -1063,12 +1061,11 @@ static jstring nativeProcess(
 
     nativeLog(
         "I",
-        "JNI process called inputFd=%d outputFd=%d targetFps=%d durationUs=%lld listener=%p",
+        "JNI process called inputFd=%d outputFd=%d targetFps=%d durationUs=%lld",
         inputFd,
         outputFd,
         targetFps,
-        static_cast<long long>(durationUs),
-        static_cast<void*>(listener)
+        static_cast<long long>(durationUs)
     );
 
     if (!env) {
@@ -1083,20 +1080,12 @@ static jstring nativeProcess(
     if (targetFps != 60 &&
         targetFps != 90 &&
         targetFps != 120) {
-        return env->NewStringUTF(
-            "FPS غير مدعوم"
-        );
+        return env->NewStringUTF("FPS غير مدعوم");
     }
 
     if (inputFd < 0 || outputFd < 0) {
         return env->NewStringUTF(
             "ملف الإدخال أو الإخراج غير صالح"
-        );
-    }
-
-    if (!listener) {
-        return env->NewStringUTF(
-            "مستمع التقدم غير صالح"
         );
     }
 
@@ -1106,8 +1095,7 @@ static jstring nativeProcess(
             outputFd,
             targetFps,
             durationUs,
-            env,
-            listener
+            env
         );
 
     nativeLog(
@@ -1120,9 +1108,7 @@ static jstring nativeProcess(
         return nullptr;
     }
 
-    return env->NewStringUTF(
-        error.c_str()
-    );
+    return env->NewStringUTF(error.c_str());
 }
 
 static void nativeCancel(
@@ -1135,7 +1121,7 @@ static void nativeCancel(
 static JNINativeMethod kNativeMethods[] = {
     {
         "process",
-        "(IIIJLcom/hyouka/videofps/FpsProcessor$ProgressListener;)Ljava/lang/String;",
+        "(IIIJ)Ljava/lang/String;",
         reinterpret_cast<void*>(nativeProcess)
     },
     {
