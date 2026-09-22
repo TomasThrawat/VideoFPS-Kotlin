@@ -302,21 +302,6 @@ class MainActivity : Activity() {
                 metadata.durationUs,
                 listener
             )
-            val error = FpsProcessor.process(
-                inputFd,
-                outputFd,
-                targetFps,
-                metadata.durationUs,
-                object : FpsProcessor.ProgressListener {
-                    override fun onProgress(percent: Int) {
-                        runOnUiThread {
-                            progressBar.progress = percent.coerceIn(0, 100)
-                            statusText.text = "جاري التحويل... $percent%"
-                        }
-                    }
-                }
-            )
-
             closeFd(inputFd)
             inputFd = -1
             closeFd(outputFd)
