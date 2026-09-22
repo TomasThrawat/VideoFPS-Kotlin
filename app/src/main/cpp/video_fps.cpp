@@ -1,1 +1,993 @@
-\n#include <jni.h>\n#include <unistd.h>\n\n#include <algorithm>\n#include <atomic>\n#include <cstdio>\n#include <string>\n\nextern \"C\" {\n#include <libavcodec/avcodec.h>\n#include <libavfilter/avfilter.h>\n#include <libavfilter/buffersink.h>\n#include <libavfilter/buffersrc.h>\n#include <libavformat/avformat.h>\n#include <libavutil/channel_layout.h>\n#include <libavutil/error.h>\n#include <libavutil/frame.h>\n#include <libavutil/mathematics.h>\n#include <libavutil/opt.h>\n#include <libavutil/samplefmt.h>\n#include <libswresample/swresample.h>\n}\n\nnamespace {\nstd::atomic_bool g_cancel{false};\n\nstd::string ffError(int code) {\n    char buf[AV_ERROR_MAX_STRING_SIZE] = {};\n    av_strerror(code, buf, sizeof(buf));\n    return std::string(buf);\n}\n\nvoid progress(JNIEnv* env, jobject listener, jmethodID method, int value) {\n    if (!env || !listener || !method) return;\n    value = std::max(0, std::min(100, value));\n    env->CallVoidMethod(listener, method, static_cast<jint>(value));\n    if (env->ExceptionCheck()) env->ExceptionClear();\n}\n\nint writeVideoPacket(\n    AVCodecContext* encoder,\n    AVFormatContext* output,\n    AVStream* stream,\n    AVFrame* frame\n) {\n    int ret = avcodec_send_frame(encoder, frame);\n    if (ret < 0) return ret;\n\n    AVPacket* packet = av_packet_alloc();\n    if (!packet) return AVERROR(ENOMEM);\n\n    while (true) {\n        ret = avcodec_receive_packet(encoder, packet);\n        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {\n            ret = 0;\n            break;\n        }\n        if (ret < 0) break;\n\n        packet->stream_index = stream->index;\n        av_packet_rescale_ts(packet, encoder->time_base, stream->time_base);\n        ret = av_interleaved_write_frame(output, packet);\n        av_packet_unref(packet);\n        if (ret < 0) break;\n    }\n\n    av_packet_free(&packet);\n    return ret;\n}\n\nint writeAudioPacket(\n    AVCodecContext* encoder,\n    AVFormatContext* output,\n    AVStream* stream,\n    AVFrame* frame\n) {\n    int ret = avcodec_send_frame(encoder, frame);\n    if (ret < 0) return ret;\n\n    AVPacket* packet = av_packet_alloc();\n    if (!packet) return AVERROR(ENOMEM);\n\n    while (true) {\n        ret = avcodec_receive_packet(encoder, packet);\n        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {\n            ret = 0;\n            break;\n        }\n        if (ret < 0) break;\n\n        packet->stream_index = stream->index;\n        av_packet_rescale_ts(packet, encoder->time_base, stream->time_base);\n        ret = av_interleaved_write_frame(output, packet);\n        av_packet_unref(packet);\n        if (ret < 0) break;\n    }\n\n    av_packet_free(&packet);\n    return ret;\n}\n\nint drainVideo(\n    AVFilterContext* sink,\n    AVCodecContext* encoder,\n    AVFormatContext* output,\n    AVStream* stream\n) {\n    const AVRational sinkTimeBase = av_buffersink_get_time_base(sink);\n    AVFrame* frame = av_frame_alloc();\n    if (!frame) return AVERROR(ENOMEM);\n\n    int ret = 0;\n    while (true) {\n        ret = av_buffersink_get_frame(sink, frame);\n        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {\n            ret = 0;\n            break;\n        }\n        if (ret < 0) break;\n\n        if (frame->pts != AV_NOPTS_VALUE) {\n            frame->pts = av_rescale_q(\n                frame->pts,\n                sinkTimeBase,\n                encoder->time_base\n            );\n        }\n\n        ret = writeVideoPacket(encoder, output, stream, frame);\n        av_frame_unref(frame);\n        if (ret < 0) break;\n    }\n\n    av_frame_free(&frame);\n    return ret;\n}\n\nint chooseSampleRate(const AVCodec* codec, int requested) {\n    const void* config = nullptr;\n    int count = 0;\n    const int ret = avcodec_get_supported_config(\n        nullptr,\n        codec,\n        AV_CODEC_CONFIG_SAMPLE_RATE,\n        0,\n        &config,\n        &count\n    );\n\n    if (ret < 0 || !config || count <= 0) {\n        return requested > 0 ? requested : 48000;\n    }\n\n    const int* rates = static_cast<const int*>(config);\n\n    for (int i = 0; i < count; ++i) {\n        if (rates[i] == requested) return requested;\n    }\n\n    for (int i = 0; i < count; ++i) {\n        if (rates[i] == 48000) return 48000;\n    }\n\n    return rates[0];\n}\n\nAVSampleFormat chooseSampleFormat(const AVCodec* codec) {\n    const void* config = nullptr;\n    int count = 0;\n\n    const int ret = avcodec_get_supported_config(\n        nullptr,\n        codec,\n        AV_CODEC_CONFIG_SAMPLE_FORMAT,\n        0,\n        &config,\n        &count\n    );\n\n    if (ret < 0 || !config || count <= 0) {\n        return AV_SAMPLE_FMT_FLTP;\n    }\n\n    const auto* formats =\n        static_cast<const AVSampleFormat*>(config);\n\n    return formats[0];\n}\n\nint convertAudio(\n    AVFrame* input,\n    AVFrame* output,\n    SwrContext* swr,\n    const AVChannelLayout* outputLayout,\n    int outputRate,\n    AVSampleFormat outputFormat,\n    int64_t outputPts\n) {\n    const int outputSamples = static_cast<int>(av_rescale_rnd(\n        swr_get_delay(swr, input->sample_rate) + input->nb_samples,\n        outputRate,\n        input->sample_rate,\n        AV_ROUND_UP\n    ));\n\n    output->format = outputFormat;\n    output->sample_rate = outputRate;\n    output->ch_layout = *outputLayout;\n    output->nb_samples = outputSamples;\n    output->pts = outputPts;\n\n    int ret = av_frame_get_buffer(output, 0);\n    if (ret < 0) return ret;\n\n    const uint8_t** inData =\n        const_cast<const uint8_t**>(input->extended_data);\n\n    ret = swr_convert(\n        swr,\n        output->data,\n        output->nb_samples,\n        inData,\n        input->nb_samples\n    );\n    if (ret < 0) return ret;\n\n    output->nb_samples = ret;\n    return 0;\n}\n\nstd::string process(\n    int inputFd,\n    int outputFd,\n    int targetFps,\n    int64_t durationUs,\n    JNIEnv* env,\n    jobject listener\n) {\n    g_cancel.store(false);\n\n    jclass listenerClass =\n        env->FindClass(\"com/hyouka/videofps/ProgressListener\");\n    if (!listenerClass) {\n        env->ExceptionClear();\n        return \"تعذر تجهيز مستمع التقدم\";\n    }\n\n    const jmethodID progressMethod =\n        env->GetMethodID(listenerClass, \"onProgress\", \"(I)V\");\n    if (!progressMethod) {\n        env->ExceptionClear();\n        return \"تعذر تجهيز التقدم\";\n    }\n\n    const std::string inputPath =\n        \"/proc/self/fd/\" + std::to_string(inputFd);\n    const std::string outputPath =\n        \"/proc/self/fd/\" + std::to_string(outputFd);\n\n    AVFormatContext* input = nullptr;\n    AVFormatContext* output = nullptr;\n    AVCodecContext* videoDecoder = nullptr;\n    AVCodecContext* audioDecoder = nullptr;\n    AVCodecContext* videoEncoder = nullptr;\n    AVCodecContext* audioEncoder = nullptr;\n    AVFilterGraph* graph = nullptr;\n    AVFilterContext* source = nullptr;\n    AVFilterContext* sink = nullptr;\n    SwrContext* swr = nullptr;\n\n    AVPacket* packet = nullptr;\n    AVFrame* videoFrame = nullptr;\n    AVFrame* audioFrame = nullptr;\n    AVFrame* convertedAudio = nullptr;\n\n    int videoIndex = -1;\n    int audioIndex = -1;\n    int ret = 0;\n    std::string error;\n\n    av_log_set_level(AV_LOG_ERROR);\n\n    do {\n        ret = avformat_open_input(\n            &input,\n            inputPath.c_str(),\n            nullptr,\n            nullptr\n        );\n        if (ret < 0) {\n            error = \"فتح الفيديو فشل: \" + ffError(ret);\n            break;\n        }\n\n        ret = avformat_find_stream_info(input, nullptr);\n        if (ret < 0) {\n            error = \"قراءة معلومات الفيديو فشلت: \" + ffError(ret);\n            break;\n        }\n\n        for (unsigned i = 0; i < input->nb_streams; ++i) {\n            const AVCodecParameters* params =\n                input->streams[i]->codecpar;\n\n            if (params->codec_type == AVMEDIA_TYPE_VIDEO &&\n                videoIndex < 0) {\n                videoIndex = static_cast<int>(i);\n            } else if (\n                params->codec_type == AVMEDIA_TYPE_AUDIO &&\n                audioIndex < 0\n            ) {\n                audioIndex = static_cast<int>(i);\n            }\n        }\n\n        if (videoIndex < 0) {\n            error = \"لم يتم العثور على مسار فيديو\";\n            break;\n        }\n\n        AVStream* videoInput =\n            input->streams[videoIndex];\n\n        const AVCodec* videoDecoderCodec =\n            avcodec_find_decoder(\n                videoInput->codecpar->codec_id\n            );\n\n        if (!videoDecoderCodec) {\n            error = \"ترميز الفيديو غير مدعوم\";\n            break;\n        }\n\n        videoDecoder =\n            avcodec_alloc_context3(videoDecoderCodec);\n\n        if (!videoDecoder) {\n            error = \"تعذر إنشاء مفكك الفيديو\";\n            break;\n        }\n\n        ret = avcodec_parameters_to_context(\n            videoDecoder,\n            videoInput->codecpar\n        );\n\n        if (ret < 0) {\n            error = \"تهيئة مفكك الفيديو فشلت: \" +\n                ffError(ret);\n            break;\n        }\n\n        videoDecoder->thread_count = 0;\n\n        ret = avcodec_open2(\n            videoDecoder,\n            videoDecoderCodec,\n            nullptr\n        );\n\n        if (ret < 0) {\n            error = \"فتح مفكك الفيديو فشل: \" +\n                ffError(ret);\n            break;\n        }\n\n        if (audioIndex >= 0) {\n            const AVStream* audioInput =\n                input->streams[audioIndex];\n\n            const AVCodec* audioDecoderCodec =\n                avcodec_find_decoder(\n                    audioInput->codecpar->codec_id\n                );\n\n            if (audioDecoderCodec) {\n                audioDecoder =\n                    avcodec_alloc_context3(\n                        audioDecoderCodec\n                    );\n\n                if (audioDecoder) {\n                    ret = avcodec_parameters_to_context(\n                        audioDecoder,\n                        audioInput->codecpar\n                    );\n\n                    if (ret < 0 ||\n                        avcodec_open2(\n                            audioDecoder,\n                            audioDecoderCodec,\n                            nullptr\n                        ) < 0) {\n                        avcodec_free_context(&audioDecoder);\n                    }\n                }\n            }\n        }\n\n        ret = avformat_alloc_output_context2(\n            &output,\n            nullptr,\n            \"mp4\",\n            outputPath.c_str()\n        );\n\n        if (ret < 0 || !output) {\n            error = \"تعذر إنشاء MP4: \" +\n                ffError(ret);\n            break;\n        }\n\n        const AVCodec* videoEncoderCodec =\n            avcodec_find_encoder_by_name(\"libopenh264\");\n\n        if (!videoEncoderCodec) {\n            error = \"OpenH264 encoder غير موجود\";\n            break;\n        }\n\n        videoEncoder =\n            avcodec_alloc_context3(videoEncoderCodec);\n\n        if (!videoEncoder) {\n            error = \"تعذر إنشاء encoder الفيديو\";\n            break;\n        }\n\n        int width = videoDecoder->width;\n        int height = videoDecoder->height;\n\n        if (width & 1) --width;\n        if (height & 1) --height;\n\n        if (width <= 0 || height <= 0 ||\n            width > 3840 || height > 2160) {\n            error = \"الدقة غير مناسبة. الحد الأقصى 3840 × 2160\";\n            break;\n        }\n\n        videoEncoder->codec_type = AVMEDIA_TYPE_VIDEO;\n        videoEncoder->codec_id = AV_CODEC_ID_H264;\n        videoEncoder->width = width;\n        videoEncoder->height = height;\n        videoEncoder->pix_fmt = AV_PIX_FMT_YUV420P;\n        videoEncoder->time_base = AVRational{1, targetFps};\n        videoEncoder->framerate = AVRational{targetFps, 1};\n        videoEncoder->gop_size = targetFps * 2;\n        videoEncoder->max_b_frames = 0;\n        videoEncoder->bit_rate = std::clamp<int64_t>(\n            static_cast<int64_t>(width) * height * targetFps / 50,\n            2000000LL,\n            20000000LL\n        );\n\n        if (output->oformat->flags & AVFMT_GLOBALHEADER) {\n            videoEncoder->flags |=\n                AV_CODEC_FLAG_GLOBAL_HEADER;\n        }\n\n        ret = avcodec_open2(\n            videoEncoder,\n            videoEncoderCodec,\n            nullptr\n        );\n\n        if (ret < 0) {\n            error = \"فتح OpenH264 فشل: \" +\n                ffError(ret);\n            break;\n        }\n\n        AVStream* videoOutput =\n            avformat_new_stream(output, nullptr);\n\n        if (!videoOutput) {\n            error = \"تعذر إنشاء مسار الفيديو\";\n            break;\n        }\n\n        videoOutput->time_base =\n            videoEncoder->time_base;\n\n        ret = avcodec_parameters_from_context(\n            videoOutput->codecpar,\n            videoEncoder\n        );\n\n        if (ret < 0) {\n            error = \"تعذر تجهيز إعدادات الفيديو\";\n            break;\n        }\n\n        videoOutput->codecpar->codec_tag = 0;\n\n        AVStream* audioOutput = nullptr;\n\n        if (audioDecoder) {\n            const AVCodec* audioEncoderCodec =\n                avcodec_find_encoder(AV_CODEC_ID_AAC);\n\n            if (audioEncoderCodec) {\n                audioEncoder =\n                    avcodec_alloc_context3(\n                        audioEncoderCodec\n                    );\n\n                if (audioEncoder) {\n                    audioEncoder->sample_rate =\n                        chooseSampleRate(\n                            audioEncoderCodec,\n                            audioDecoder->sample_rate\n                        );\n\n                    audioEncoder->sample_fmt =\n                        chooseSampleFormat(audioEncoderCodec);\n\n                    audioEncoder->bit_rate =\n                        audioDecoder->ch_layout.nb_channels <= 2\n                            ? 128000\n                            : 192000;\n\n                    audioEncoder->time_base =\n                        AVRational{\n                            1,\n                            audioEncoder->sample_rate\n                        };\n\n                    if (audioDecoder->ch_layout.nb_channels > 0) {\n                        av_channel_layout_copy(\n                            &audioEncoder->ch_layout,\n                            &audioDecoder->ch_layout\n                        );\n                    } else {\n                        av_channel_layout_default(\n                            &audioEncoder->ch_layout,\n                            2\n                        );\n                    }\n\n                    if (output->oformat->flags &\n                        AVFMT_GLOBALHEADER) {\n                        audioEncoder->flags |=\n                            AV_CODEC_FLAG_GLOBAL_HEADER;\n                    }\n\n                    ret = avcodec_open2(\n                        audioEncoder,\n                        audioEncoderCodec,\n                        nullptr\n                    );\n\n                    if (ret >= 0) {\n                        audioOutput =\n                            avformat_new_stream(\n                                output,\n                                nullptr\n                            );\n\n                        if (!audioOutput) {\n                            ret = AVERROR(ENOMEM);\n                        } else {\n                            audioOutput->time_base =\n                                audioEncoder->time_base;\n\n                            ret =\n                                avcodec_parameters_from_context(\n                                    audioOutput->codecpar,\n                                    audioEncoder\n                                );\n                        }\n                    }\n\n                    if (ret < 0) {\n                        avcodec_free_context(\n                            &audioEncoder\n                        );\n                        audioOutput = nullptr;\n                    }\n                }\n            }\n        }\n\n        if (audioDecoder && audioEncoder && audioOutput) {\n            AVChannelLayout inputLayout;\n            AVChannelLayout outputLayout;\n\n            if (audioDecoder->ch_layout.nb_channels > 0) {\n                av_channel_layout_copy(\n                    &inputLayout,\n                    &audioDecoder->ch_layout\n                );\n            } else {\n                av_channel_layout_default(\n                    &inputLayout,\n                    2\n                );\n            }\n\n            av_channel_layout_copy(\n                &outputLayout,\n                &audioEncoder->ch_layout\n            );\n\n            ret = swr_alloc_set_opts2(\n                &swr,\n                &outputLayout,\n                audioEncoder->sample_fmt,\n                audioEncoder->sample_rate,\n                &inputLayout,\n                audioDecoder->sample_fmt,\n                audioDecoder->sample_rate,\n                0,\n                nullptr\n            );\n\n            av_channel_layout_uninit(&inputLayout);\n            av_channel_layout_uninit(&outputLayout);\n\n            if (ret < 0 || !swr) {\n                error =\n                    \"تهيئة محول الصوت فشلت: \" +\n                    ffError(ret);\n                break;\n            }\n\n            ret = swr_init(swr);\n            if (ret < 0) {\n                error =\n                    \"تهيئة resampler فشلت: \" +\n                    ffError(ret);\n                break;\n            }\n        }\n\n        {\n            const AVRational guessedRate =\n                av_guess_frame_rate(\n                    input,\n                    videoInput,\n                    nullptr\n                );\n\n            const AVRational inputRate =\n                guessedRate.num > 0 &&\n                guessedRate.den > 0\n                    ? guessedRate\n                    : AVRational{30, 1};\n\n            char bufferArgs[512];\n\n            std::snprintf(\n                bufferArgs,\n                sizeof(bufferArgs),\n                \"video_size=%dx%d:pix_fmt=%d:\"\n                \"time_base=%d/%d:pixel_aspect=%d/%d:\"\n                \"frame_rate=%d/%d\",\n                videoDecoder->width,\n                videoDecoder->height,\n                videoDecoder->pix_fmt,\n                videoDecoder->time_base.num,\n                videoDecoder->time_base.den,\n                videoDecoder->sample_aspect_ratio.num > 0\n                    ? videoDecoder->sample_aspect_ratio.num\n                    : 1,\n                videoDecoder->sample_aspect_ratio.den > 0\n                    ? videoDecoder->sample_aspect_ratio.den\n                    : 1,\n                inputRate.num,\n                inputRate.den\n            );\n\n            graph = avfilter_graph_alloc();\n            if (!graph) {\n                error = \"تعذر إنشاء filter graph\";\n                break;\n            }\n\n            const AVFilter* bufferFilter =\n                avfilter_get_by_name(\"buffer\");\n\n            const AVFilter* sinkFilter =\n                avfilter_get_by_name(\"buffersink\");\n\n            if (!bufferFilter || !sinkFilter) {\n                error = \"فلاتر الفيديو الأساسية غير موجودة\";\n                break;\n            }\n\n            ret = avfilter_graph_create_filter(\n                &source,\n                bufferFilter,\n                \"in\",\n                bufferArgs,\n                nullptr,\n                graph\n            );\n\n            if (ret < 0) {\n                error =\n                    \"إنشاء مصدر الفيديو فشل: \" +\n                    ffError(ret);\n                break;\n            }\n\n            ret = avfilter_graph_create_filter(\n                &sink,\n                sinkFilter,\n                \"out\",\n                nullptr,\n                nullptr,\n                graph\n            );\n\n            if (ret < 0) {\n                error =\n                    \"إنشاء مخرج الفيديو فشل: \" +\n                    ffError(ret);\n                break;\n            }\n\n            const enum AVPixelFormat sinkFormats[] = {\n                AV_PIX_FMT_YUV420P\n            };\n\n            ret = av_opt_set_array(\n                sink,\n                \"pixel_formats\",\n                AV_OPT_SEARCH_CHILDREN,\n                0,\n                1,\n                AV_OPT_TYPE_PIXEL_FMT,\n                sinkFormats\n            );\n\n            if (ret < 0) {\n                error = \"ضبط صيغة الفيديو فشل\";\n                break;\n            }\n\n            std::string chain =\n                \"format=pix_fmts=yuv420p\";\n\n            if ((videoDecoder->width & 1) ||\n                (videoDecoder->height & 1)) {\n                chain +=\n                    \",scale=trunc(iw/2)*2:trunc(ih/2)*2\";\n            }\n\n            if (videoDecoder->field_order !=\n                    AV_FIELD_PROGRESSIVE &&\n                videoDecoder->field_order !=\n                    AV_FIELD_UNKNOWN) {\n                chain += \",yadif=mode=send_frame\";\n            }\n\n            chain +=\n                \",minterpolate=fps=\" +\n                std::to_string(targetFps) +\n                \":mi_mode=mci:mc_mode=aobmc:\"\n                \"me_mode=bidir:me=epzs:vsbmc=1:\"\n                \"scd=fdiff\";\n\n            AVFilterInOut* inputs =\n                avfilter_inout_alloc();\n\n            AVFilterInOut* outputs =\n                avfilter_inout_alloc();\n\n            if (!inputs || !outputs) {\n                avfilter_inout_free(&inputs);\n                avfilter_inout_free(&outputs);\n                error = \"تعذر إنشاء وصلات الفلاتر\";\n                break;\n            }\n\n            outputs->name = av_strdup(\"in\");\n            outputs->filter_ctx = source;\n            outputs->pad_idx = 0;\n            outputs->next = nullptr;\n\n            inputs->name = av_strdup(\"out\");\n            inputs->filter_ctx = sink;\n            inputs->pad_idx = 0;\n            inputs->next = nullptr;\n\n            ret = avfilter_graph_parse_ptr(\n                graph,\n                chain.c_str(),\n                &inputs,\n                &outputs,\n                nullptr\n            );\n\n            avfilter_inout_free(&inputs);\n            avfilter_inout_free(&outputs);\n\n            if (ret < 0) {\n                error =\n                    \"بناء فلتر interpolation فشل: \" +\n                    ffError(ret);\n                break;\n            }\n\n            ret = avfilter_graph_config(\n                graph,\n                nullptr\n            );\n\n            if (ret < 0) {\n                error =\n                    \"تهيئة فلتر interpolation فشلت: \" +\n                    ffError(ret);\n                break;\n            }\n        }\n\n        ret = avio_open(\n            &output->pb,\n            outputPath.c_str(),\n            AVIO_FLAG_WRITE\n        );\n\n        if (ret < 0) {\n            error =\n                \"فتح ملف MP4 فشل: \" +\n                ffError(ret);\n            break;\n        }\n\n        ret = avformat_write_header(\n            output,\n            nullptr\n        );\n\n        if (ret < 0) {\n            error =\n                \"كتابة رأس MP4 فشلت: \" +\n                ffError(ret);\n            break;\n        }\n\n        packet = av_packet_alloc();\n        videoFrame = av_frame_alloc();\n        audioFrame = av_frame_alloc();\n        convertedAudio = av_frame_alloc();\n\n        if (!packet || !videoFrame ||\n            !audioFrame || !convertedAudio) {\n            error = \"تعذر تخصيص ذاكرة التحويل\";\n            break;\n        }\n\n        int lastProgress = -1;\n\n        while (!g_cancel.load() &&\n               (ret = av_read_frame(\n                    input,\n                    packet\n               )) >= 0) {\n\n            if (packet->stream_index ==\n                videoIndex) {\n\n                ret = avcodec_send_packet(\n                    videoDecoder,\n                    packet\n                );\n\n                if (ret < 0) {\n                    error =\n                        \"إرسال الفيديو للفك فشل: \" +\n                        ffError(ret);\n                    break;\n                }\n\n                while (!g_cancel.load()) {\n                    ret = avcodec_receive_frame(\n                        videoDecoder,\n                        videoFrame\n                    );\n\n                    if (ret == AVERROR(EAGAIN) ||\n                        ret == AVERROR_EOF) {\n                        ret = 0;\n                        break;\n                    }\n\n                    if (ret < 0) {\n                        error =\n                            \"فك الفيديو فشل: \" +\n                            ffError(ret);\n                        break;\n                    }\n\n                    const int64_t frameTimestamp =\n                        videoFrame->best_effort_timestamp;\n\n                    ret = av_buffersrc_add_frame_flags(\n                        source,\n                        videoFrame,\n                        AV_BUFFERSRC_FLAG_KEEP_REF\n                    );\n\n                    av_frame_unref(videoFrame);\n\n                    if (ret < 0) {\n                        error =\n                            \"إرسال الفيديو للفلاتر فشل: \" +\n                            ffError(ret);\n                        break;\n                    }\n\n                    ret = drainVideo(\n                        sink,\n                        videoEncoder,\n                        output,\n                        output->streams[0]\n                    );\n\n                    if (ret < 0) {\n                        error =\n                            \"ترميز الفيديو فشل: \" +\n                            ffError(ret);\n                        break;\n                    }\n\n                    if (durationUs > 0 &&\n                        frameTimestamp != AV_NOPTS_VALUE) {\n                        const int64_t frameUs =\n                            av_rescale_q(\n                                frameTimestamp,\n                                videoInput->time_base,\n                                AVRational{1, 1000000}\n                            );\n\n                        const int percent =\n                            static_cast<int>(\n                                std::clamp<int64_t>(\n                                    frameUs * 100 /\n                                        durationUs,\n                                    0,\n                                    99\n                                )\n                            );\n\n                        if (percent != lastProgress) {\n                            progress(\n                                env,\n                                listener,\n                                progressMethod,\n                                percent\n                            );\n                            lastProgress = percent;\n                        }\n                    }\n                }\n            } else if (\n                packet->stream_index == audioIndex &&\n                audioDecoder &&\n                audioEncoder &&\n                audioOutput &&\n                swr\n            ) {\n                ret = avcodec_send_packet(\n                    audioDecoder,\n                    packet\n                );\n\n                if (ret < 0) {\n                    error =\n                        \"إرسال الصوت للفك فشل: \" +\n                        ffError(ret);\n                    break;\n                }\n\n                while (!g_cancel.load()) {\n                    ret = avcodec_receive_frame(\n                        audioDecoder,\n                        audioFrame\n                    );\n\n                    if (ret == AVERROR(EAGAIN) ||\n                        ret == AVERROR_EOF) {\n                        ret = 0;\n                        break;\n                    }\n\n                    if (ret < 0) {\n                        error =\n                            \"فك الصوت فشل: \" +\n                            ffError(ret);\n                        break;\n                    }\n\n                    av_frame_unref(\n                        convertedAudio\n                    );\n\n                    int64_t inputPts =\n                        audioFrame->best_effort_timestamp;\n\n                    if (inputPts == AV_NOPTS_VALUE) {\n                        inputPts = 0;\n                    }\n\n                    const int64_t outputPts =\n                        av_rescale_q(\n                            inputPts,\n                            input->streams[audioIndex]\n                                ->time_base,\n                            audioEncoder->time_base\n                        );\n\n                    ret = convertAudio(\n                        audioFrame,\n                        convertedAudio,\n                        swr,\n                        &audioEncoder->ch_layout,\n                        audioEncoder->sample_rate,\n                        audioEncoder->sample_fmt,\n                        outputPts\n                    );\n\n                    if (ret < 0) {\n                        error =\n                            \"تحويل الصوت فشل: \" +\n                            ffError(ret);\n                        break;\n                    }\n\n                    ret = writeAudioPacket(\n                        audioEncoder,\n                        output,\n                        audioOutput,\n                        convertedAudio\n                    );\n\n                    if (ret < 0) {\n                        error =\n                            \"ترميز الصوت فشل: \" +\n                            ffError(ret);\n                        break;\n                    }\n                }\n            }\n\n            av_packet_unref(packet);\n\n            if (ret < 0 || g_cancel.load()) {\n                break;\n            }\n        }\n\n        if (g_cancel.load()) {\n            error = \"تم إلغاء العملية\";\n            break;\n        }\n\n        if (ret != AVERROR_EOF && ret < 0) {\n            error =\n                \"قراءة الفيديو فشلت: \" +\n                ffError(ret);\n            break;\n        }\n\n        ret = avcodec_send_packet(\n            videoDecoder,\n            nullptr\n        );\n\n        if (ret < 0) {\n            error = \"إنهاء فك الفيديو فشل\";\n            break;\n        }\n\n        while (true) {\n            ret = avcodec_receive_frame(\n                videoDecoder,\n                videoFrame\n            );\n\n            if (ret == AVERROR(EAGAIN) ||\n                ret == AVERROR_EOF) {\n                ret = 0;\n                break;\n            }\n\n            if (ret < 0) break;\n\n            av_buffersrc_add_frame_flags(\n                source,\n                videoFrame,\n                AV_BUFFERSRC_FLAG_KEEP_REF\n            );\n\n            av_frame_unref(videoFrame);\n\n            ret = drainVideo(\n                sink,\n                videoEncoder,\n                output,\n                output->streams[0]\n            );\n\n            if (ret < 0) break;\n        }\n\n        if (ret < 0) {\n            error =\n                \"تفريغ فك الفيديو فشل: \" +\n                ffError(ret);\n            break;\n        }\n\n        ret = av_buffersrc_add_frame_flags(\n            source,\n            nullptr,\n            0\n        );\n\n        if (ret < 0) {\n            error =\n                \"تعذر إنهاء فلتر interpolation: \" +\n                ffError(ret);\n            break;\n        }\n\n        ret = drainVideo(\n            sink,\n            videoEncoder,\n            output,\n            output->streams[0]\n        );\n\n        if (ret < 0) {\n            error =\n                \"تفريغ filter فشل: \" +\n                ffError(ret);\n            break;\n        }\n\n        ret = writeVideoPacket(\n            videoEncoder,\n            output,\n            output->streams[0],\n            nullptr\n        );\n\n        if (ret < 0) {\n            error =\n                \"تفريغ encoder الفيديو فشل: \" +\n                ffError(ret);\n            break;\n        }\n\n        if (audioDecoder &&\n            audioEncoder &&\n            audioOutput) {\n\n            ret = avcodec_send_packet(\n                audioDecoder,\n                nullptr\n            );\n\n            if (ret >= 0) {\n                while (true) {\n                    ret = avcodec_receive_frame(\n                        audioDecoder,\n                        audioFrame\n                    );\n\n                    if (ret == AVERROR(EAGAIN) ||\n                        ret == AVERROR_EOF) {\n                        ret = 0;\n                        break;\n                    }\n\n                    if (ret < 0) break;\n\n                    av_frame_unref(\n                        convertedAudio\n                    );\n\n                    int64_t inputPts =\n                        audioFrame->best_effort_timestamp;\n\n                    if (inputPts == AV_NOPTS_VALUE) {\n                        inputPts = 0;\n                    }\n\n                    const int64_t outputPts =\n                        av_rescale_q(\n                            inputPts,\n                            input->streams[audioIndex]\n                                ->time_base,\n                            audioEncoder->time_base\n                        );\n\n                    ret = convertAudio(\n                        audioFrame,\n                        convertedAudio,\n                        swr,\n                        &audioEncoder->ch_layout,\n                        audioEncoder->sample_rate,\n                        audioEncoder->sample_fmt,\n                        outputPts\n                    );\n\n                    if (ret < 0) break;\n\n                    ret = writeAudioPacket(\n                        audioEncoder,\n                        output,\n                        audioOutput,\n                        convertedAudio\n                    );\n\n                    if (ret < 0) break;\n                }\n            }\n\n            ret = writeAudioPacket(\n                audioEncoder,\n                output,\n                audioOutput,\n                nullptr\n            );\n\n            if (ret < 0) {\n                error =\n                    \"تفريغ encoder الصوت فشل: \" +\n                    ffError(ret);\n                break;\n            }\n        }\n\n        ret = av_write_trailer(output);\n\n        if (ret < 0) {\n            error =\n                \"إنهاء MP4 فشل: \" +\n                ffError(ret);\n            break;\n        }\n\n        progress(\n            env,\n            listener,\n            progressMethod,\n            100\n        );\n\n        error.clear();\n    } while (false);\n\n    if (packet) av_packet_free(&packet);\n    if (videoFrame) av_frame_free(&videoFrame);\n    if (audioFrame) av_frame_free(&audioFrame);\n    if (convertedAudio) av_frame_free(&convertedAudio);\n\n    if (swr) swr_free(&swr);\n    if (graph) avfilter_graph_free(&graph);\n\n    if (output) {\n        if (output->pb) avio_closep(&output->pb);\n        avformat_free_context(output);\n    }\n\n    if (videoEncoder) avcodec_free_context(&videoEncoder);\n    if (audioEncoder) avcodec_free_context(&audioEncoder);\n    if (videoDecoder) avcodec_free_context(&videoDecoder);\n    if (audioDecoder) avcodec_free_context(&audioDecoder);\n\n    if (input) avformat_close_input(&input);\n\n    close(inputFd);\n    close(outputFd);\n\n    return error;\n}\n}\n\nextern \"C\"\nJNIEXPORT jstring JNICALL\nJava_com_hyouka_videofps_FpsProcessor_process(\n    JNIEnv* env,\n    jobject,\n    jint inputFd,\n    jint outputFd,\n    jint targetFps,\n    jlong durationUs,\n    jobject listener\n) {\n    if (targetFps != 60 &&\n        targetFps != 90 &&\n        targetFps != 120) {\n        return env->NewStringUTF(\"FPS غير مدعوم\");\n    }\n\n    if (inputFd < 0 || outputFd < 0) {\n        return env->NewStringUTF(\n            \"ملف الإدخال أو الإخراج غير صالح\"\n        );\n    }\n\n    if (!listener) {\n        return env->NewStringUTF(\n            \"مستمع التقدم غير صالح\"\n        );\n    }\n\n    const std::string error = process(\n        inputFd,\n        outputFd,\n        targetFps,\n        durationUs,\n        env,\n        listener\n    );\n\n    if (error.empty()) return nullptr;\n\n    return env->NewStringUTF(error.c_str());\n}\n\nextern \"C\"\nJNIEXPORT void JNICALL\nJava_com_hyouka_videofps_FpsProcessor_cancel(\n    JNIEnv*,\n    jobject\n) {\n    g_cancel.store(true);\n}\n\n
+#include <jni.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <atomic>
+#include <cstdio>
+#include <string>
+
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavfilter/avfilter.h>
+#include <libavfilter/buffersink.h>
+#include <libavfilter/buffersrc.h>
+#include <libavformat/avformat.h>
+#include <libavutil/error.h>
+#include <libavutil/frame.h>
+#include <libavutil/mathematics.h>
+}
+
+namespace {
+
+std::atomic_bool g_cancel{false};
+
+std::string ffError(int code) {
+    char buffer[AV_ERROR_MAX_STRING_SIZE] = {};
+    av_strerror(code, buffer, sizeof(buffer));
+    return std::string(buffer);
+}
+
+void reportProgress(
+    JNIEnv* env,
+    jobject listener,
+    jmethodID method,
+    int value
+) {
+    if (!env || !listener || !method) return;
+
+    value = std::clamp(value, 0, 100);
+    env->CallVoidMethod(listener, method, static_cast<jint>(value));
+
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
+}
+
+int writeEncodedVideo(
+    AVCodecContext* encoder,
+    AVFormatContext* output,
+    AVStream* outputStream,
+    AVFrame* frame
+) {
+    int ret = avcodec_send_frame(encoder, frame);
+    if (ret < 0) return ret;
+
+    AVPacket* packet = av_packet_alloc();
+    if (!packet) return AVERROR(ENOMEM);
+
+    while (true) {
+        ret = avcodec_receive_packet(encoder, packet);
+
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+            ret = 0;
+            break;
+        }
+
+        if (ret < 0) break;
+
+        packet->stream_index = outputStream->index;
+
+        av_packet_rescale_ts(
+            packet,
+            encoder->time_base,
+            outputStream->time_base
+        );
+
+        ret = av_interleaved_write_frame(output, packet);
+
+        av_packet_unref(packet);
+
+        if (ret < 0) break;
+    }
+
+    av_packet_free(&packet);
+    return ret;
+}
+
+int drainFilter(
+    AVFilterContext* sink,
+    AVCodecContext* encoder,
+    AVFormatContext* output,
+    AVStream* outputStream
+) {
+    const AVRational sinkTimeBase =
+        av_buffersink_get_time_base(sink);
+
+    AVFrame* frame = av_frame_alloc();
+    if (!frame) return AVERROR(ENOMEM);
+
+    int ret = 0;
+
+    while (true) {
+        ret = av_buffersink_get_frame(sink, frame);
+
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+            ret = 0;
+            break;
+        }
+
+        if (ret < 0) break;
+
+        if (frame->pts != AV_NOPTS_VALUE) {
+            frame->pts = av_rescale_q(
+                frame->pts,
+                sinkTimeBase,
+                encoder->time_base
+            );
+        }
+
+        ret = writeEncodedVideo(
+            encoder,
+            output,
+            outputStream,
+            frame
+        );
+
+        av_frame_unref(frame);
+
+        if (ret < 0) break;
+    }
+
+    av_frame_free(&frame);
+    return ret;
+}
+
+std::string processVideo(
+    int inputFd,
+    int outputFd,
+    int targetFps,
+    int64_t durationUs,
+    JNIEnv* env,
+    jobject listener
+) {
+    g_cancel.store(false);
+
+    jclass listenerClass =
+        env->FindClass(
+            "com/hyouka/videofps/ProgressListener"
+        );
+
+    if (!listenerClass) {
+        env->ExceptionClear();
+        return "تعذر تجهيز مستمع التقدم";
+    }
+
+    jmethodID progressMethod =
+        env->GetMethodID(
+            listenerClass,
+            "onProgress",
+            "(I)V"
+        );
+
+    if (!progressMethod) {
+        env->ExceptionClear();
+        return "تعذر تجهيز التقدم";
+    }
+
+    const std::string inputPath =
+        "/proc/self/fd/" + std::to_string(inputFd);
+
+    const std::string outputPath =
+        "/proc/self/fd/" + std::to_string(outputFd);
+
+    AVFormatContext* input = nullptr;
+    AVFormatContext* output = nullptr;
+
+    AVCodecContext* decoder = nullptr;
+    AVCodecContext* encoder = nullptr;
+
+    AVFilterGraph* graph = nullptr;
+    AVFilterContext* source = nullptr;
+    AVFilterContext* sink = nullptr;
+
+    AVPacket* packet = nullptr;
+    AVFrame* decodedFrame = nullptr;
+
+    int videoInputIndex = -1;
+    int audioInputIndex = -1;
+
+    int ret = 0;
+    std::string error;
+
+    av_log_set_level(AV_LOG_ERROR);
+
+    do {
+        ret = avformat_open_input(
+            &input,
+            inputPath.c_str(),
+            nullptr,
+            nullptr
+        );
+
+        if (ret < 0) {
+            error = "فتح الفيديو فشل: " + ffError(ret);
+            break;
+        }
+
+        ret = avformat_find_stream_info(input, nullptr);
+
+        if (ret < 0) {
+            error =
+                "قراءة معلومات الفيديو فشلت: " +
+                ffError(ret);
+            break;
+        }
+
+        for (unsigned i = 0; i < input->nb_streams; ++i) {
+            const AVCodecParameters* params =
+                input->streams[i]->codecpar;
+
+            if (params->codec_type == AVMEDIA_TYPE_VIDEO &&
+                videoInputIndex < 0) {
+                videoInputIndex = static_cast<int>(i);
+            }
+
+            if (params->codec_type == AVMEDIA_TYPE_AUDIO &&
+                audioInputIndex < 0) {
+                audioInputIndex = static_cast<int>(i);
+            }
+        }
+
+        if (videoInputIndex < 0) {
+            error = "لم يتم العثور على مسار فيديو";
+            break;
+        }
+
+        AVStream* inputVideo =
+            input->streams[videoInputIndex];
+
+        const AVCodec* decoderCodec =
+            avcodec_find_decoder(
+                inputVideo->codecpar->codec_id
+            );
+
+        if (!decoderCodec) {
+            error = "ترميز الفيديو غير مدعوم";
+            break;
+        }
+
+        decoder =
+            avcodec_alloc_context3(decoderCodec);
+
+        if (!decoder) {
+            error = "تعذر إنشاء مفكك الفيديو";
+            break;
+        }
+
+        ret = avcodec_parameters_to_context(
+            decoder,
+            inputVideo->codecpar
+        );
+
+        if (ret < 0) {
+            error =
+                "تهيئة مفكك الفيديو فشلت: " +
+                ffError(ret);
+            break;
+        }
+
+        decoder->thread_count = 0;
+
+        ret = avcodec_open2(
+            decoder,
+            decoderCodec,
+            nullptr
+        );
+
+        if (ret < 0) {
+            error =
+                "فتح مفكك الفيديو فشل: " +
+                ffError(ret);
+            break;
+        }
+
+        ret = avformat_alloc_output_context2(
+            &output,
+            nullptr,
+            "mp4",
+            outputPath.c_str()
+        );
+
+        if (ret < 0 || !output) {
+            error =
+                "تعذر إنشاء MP4: " +
+                ffError(ret);
+            break;
+        }
+
+        const AVCodec* encoderCodec =
+            avcodec_find_encoder_by_name(
+                "libopenh264"
+            );
+
+        if (!encoderCodec) {
+            error = "OpenH264 encoder غير موجود";
+            break;
+        }
+
+        encoder =
+            avcodec_alloc_context3(encoderCodec);
+
+        if (!encoder) {
+            error = "تعذر إنشاء encoder الفيديو";
+            break;
+        }
+
+        int width = decoder->width;
+        int height = decoder->height;
+
+        if (width & 1) --width;
+        if (height & 1) --height;
+
+        if (width <= 0 || height <= 0 ||
+            width > 3840 || height > 2160) {
+            error =
+                "الدقة غير مناسبة. الحد الأقصى 3840 × 2160";
+            break;
+        }
+
+        encoder->codec_type = AVMEDIA_TYPE_VIDEO;
+        encoder->codec_id = AV_CODEC_ID_H264;
+        encoder->width = width;
+        encoder->height = height;
+        encoder->pix_fmt = AV_PIX_FMT_YUV420P;
+        encoder->time_base = AVRational{1, targetFps};
+        encoder->framerate = AVRational{targetFps, 1};
+        encoder->gop_size = targetFps * 2;
+        encoder->max_b_frames = 0;
+
+        const int64_t estimatedBitrate =
+            static_cast<int64_t>(width) *
+            height *
+            targetFps *
+            6LL;
+
+        encoder->bit_rate = std::clamp<int64_t>(
+            estimatedBitrate,
+            4000000LL,
+            80000000LL
+        );
+
+        if (output->oformat->flags &
+            AVFMT_GLOBALHEADER) {
+            encoder->flags |=
+                AV_CODEC_FLAG_GLOBAL_HEADER;
+        }
+
+        ret = avcodec_open2(
+            encoder,
+            encoderCodec,
+            nullptr
+        );
+
+        if (ret < 0) {
+            error =
+                "فتح OpenH264 فشل: " +
+                ffError(ret);
+            break;
+        }
+
+        AVStream* videoOutput =
+            avformat_new_stream(output, nullptr);
+
+        if (!videoOutput) {
+            error = "تعذر إنشاء مسار الفيديو";
+            break;
+        }
+
+        videoOutput->time_base =
+            encoder->time_base;
+
+        ret = avcodec_parameters_from_context(
+            videoOutput->codecpar,
+            encoder
+        );
+
+        if (ret < 0) {
+            error =
+                "تعذر تجهيز إعدادات الفيديو";
+            break;
+        }
+
+        videoOutput->codecpar->codec_tag = 0;
+
+        AVStream* audioOutput = nullptr;
+
+        if (audioInputIndex >= 0) {
+            AVStream* inputAudio =
+                input->streams[audioInputIndex];
+
+            audioOutput =
+                avformat_new_stream(output, nullptr);
+
+            if (!audioOutput) {
+                error = "تعذر إنشاء مسار الصوت";
+                break;
+            }
+
+            ret = avcodec_parameters_copy(
+                audioOutput->codecpar,
+                inputAudio->codecpar
+            );
+
+            if (ret < 0) {
+                error =
+                    "تعذر نسخ إعدادات الصوت: " +
+                    ffError(ret);
+                break;
+            }
+
+            audioOutput->time_base =
+                inputAudio->time_base;
+
+            audioOutput->codecpar->codec_tag = 0;
+        }
+
+        {
+            const AVRational guessedRate =
+                av_guess_frame_rate(
+                    input,
+                    inputVideo,
+                    nullptr
+                );
+
+            const AVRational inputRate =
+                (guessedRate.num > 0 &&
+                 guessedRate.den > 0)
+                    ? guessedRate
+                    : AVRational{30, 1};
+
+            char bufferArgs[512];
+
+            const AVRational pixelAspect =
+                (decoder->sample_aspect_ratio.num > 0 &&
+                 decoder->sample_aspect_ratio.den > 0)
+                    ? decoder->sample_aspect_ratio
+                    : AVRational{1, 1};
+
+            std::snprintf(
+                bufferArgs,
+                sizeof(bufferArgs),
+                "video_size=%dx%d:"
+                "pix_fmt=%d:"
+                "time_base=%d/%d:"
+                "pixel_aspect=%d/%d:"
+                "frame_rate=%d/%d",
+                decoder->width,
+                decoder->height,
+                decoder->pix_fmt,
+                inputVideo->time_base.num,
+                inputVideo->time_base.den,
+                pixelAspect.num,
+                pixelAspect.den,
+                inputRate.num,
+                inputRate.den
+            );
+
+            graph = avfilter_graph_alloc();
+
+            if (!graph) {
+                error = "تعذر إنشاء filter graph";
+                break;
+            }
+
+            const AVFilter* bufferFilter =
+                avfilter_get_by_name("buffer");
+
+            const AVFilter* sinkFilter =
+                avfilter_get_by_name("buffersink");
+
+            if (!bufferFilter || !sinkFilter) {
+                error =
+                    "فلاتر الفيديو الأساسية غير موجودة";
+                break;
+            }
+
+            ret = avfilter_graph_create_filter(
+                &source,
+                bufferFilter,
+                "source",
+                bufferArgs,
+                nullptr,
+                graph
+            );
+
+            if (ret < 0) {
+                error =
+                    "إنشاء مصدر الفيديو فشل: " +
+                    ffError(ret);
+                break;
+            }
+
+            ret = avfilter_graph_create_filter(
+                &sink,
+                sinkFilter,
+                "sink",
+                nullptr,
+                nullptr,
+                graph
+            );
+
+            if (ret < 0) {
+                error =
+                    "إنشاء مخرج الفيديو فشل: " +
+                    ffError(ret);
+                break;
+            }
+
+            std::string filterChain =
+                "format=pix_fmts=yuv420p";
+
+            if ((decoder->width & 1) ||
+                (decoder->height & 1)) {
+                filterChain +=
+                    ",scale=trunc(iw/2)*2:trunc(ih/2)*2";
+            }
+
+            if (decoder->field_order !=
+                    AV_FIELD_PROGRESSIVE &&
+                decoder->field_order !=
+                    AV_FIELD_UNKNOWN) {
+                filterChain +=
+                    ",yadif=mode=send_frame";
+            }
+
+            filterChain +=
+                ",minterpolate=fps=" +
+                std::to_string(targetFps) +
+                ":mi_mode=mci:"
+                "mc_mode=aobmc:"
+                "me_mode=bidir:"
+                "me=epzs:"
+                "vsbmc=1:"
+                "scd=fdiff";
+
+            AVFilterInOut* inputs =
+                avfilter_inout_alloc();
+
+            AVFilterInOut* outputs =
+                avfilter_inout_alloc();
+
+            if (!inputs || !outputs) {
+                avfilter_inout_free(&inputs);
+                avfilter_inout_free(&outputs);
+                error =
+                    "تعذر إنشاء وصلات الفلاتر";
+                break;
+            }
+
+            inputs->name = av_strdup("out");
+            inputs->filter_ctx = sink;
+            inputs->pad_idx = 0;
+            inputs->next = nullptr;
+
+            outputs->name = av_strdup("in");
+            outputs->filter_ctx = source;
+            outputs->pad_idx = 0;
+            outputs->next = nullptr;
+
+            ret = avfilter_graph_parse_ptr(
+                graph,
+                filterChain.c_str(),
+                &inputs,
+                &outputs,
+                nullptr
+            );
+
+            avfilter_inout_free(&inputs);
+            avfilter_inout_free(&outputs);
+
+            if (ret < 0) {
+                error =
+                    "بناء فلتر interpolation فشل: " +
+                    ffError(ret);
+                break;
+            }
+
+            ret = avfilter_graph_config(
+                graph,
+                nullptr
+            );
+
+            if (ret < 0) {
+                error =
+                    "تهيئة فلتر interpolation فشلت: " +
+                    ffError(ret);
+                break;
+            }
+        }
+
+        ret = avio_open(
+            &output->pb,
+            outputPath.c_str(),
+            AVIO_FLAG_WRITE
+        );
+
+        if (ret < 0) {
+            error =
+                "فتح ملف MP4 فشل: " +
+                ffError(ret);
+            break;
+        }
+
+        ret = avformat_write_header(
+            output,
+            nullptr
+        );
+
+        if (ret < 0) {
+            error =
+                "كتابة رأس MP4 فشلت: " +
+                ffError(ret);
+            break;
+        }
+
+        packet = av_packet_alloc();
+        decodedFrame = av_frame_alloc();
+
+        if (!packet || !decodedFrame) {
+            error =
+                "تعذر تخصيص ذاكرة التحويل";
+            break;
+        }
+
+        int lastProgress = -1;
+
+        while (!g_cancel.load() &&
+               (ret = av_read_frame(
+                    input,
+                    packet
+               )) >= 0) {
+
+            if (packet->stream_index ==
+                videoInputIndex) {
+
+                ret = avcodec_send_packet(
+                    decoder,
+                    packet
+                );
+
+                if (ret < 0) {
+                    error =
+                        "إرسال الفيديو للفك فشل: " +
+                        ffError(ret);
+                    break;
+                }
+
+                while (!g_cancel.load()) {
+                    ret = avcodec_receive_frame(
+                        decoder,
+                        decodedFrame
+                    );
+
+                    if (ret == AVERROR(EAGAIN) ||
+                        ret == AVERROR_EOF) {
+                        ret = 0;
+                        break;
+                    }
+
+                    if (ret < 0) {
+                        error =
+                            "فك الفيديو فشل: " +
+                            ffError(ret);
+                        break;
+                    }
+
+                    const int64_t timestamp =
+                        decodedFrame->best_effort_timestamp;
+
+                    ret = av_buffersrc_add_frame_flags(
+                        source,
+                        decodedFrame,
+                        AV_BUFFERSRC_FLAG_KEEP_REF
+                    );
+
+                    av_frame_unref(decodedFrame);
+
+                    if (ret < 0) {
+                        error =
+                            "إرسال الفيديو للفلاتر فشل: " +
+                            ffError(ret);
+                        break;
+                    }
+
+                    ret = drainFilter(
+                        sink,
+                        encoder,
+                        output,
+                        videoOutput
+                    );
+
+                    if (ret < 0) {
+                        error =
+                            "ترميز الفيديو فشل: " +
+                            ffError(ret);
+                        break;
+                    }
+
+                    if (durationUs > 0 &&
+                        timestamp != AV_NOPTS_VALUE) {
+                        const int64_t timestampUs =
+                            av_rescale_q(
+                                timestamp,
+                                inputVideo->time_base,
+                                AVRational{1, 1000000}
+                            );
+
+                        const int percent =
+                            static_cast<int>(
+                                std::clamp<int64_t>(
+                                    timestampUs * 100 /
+                                        durationUs,
+                                    0,
+                                    99
+                                )
+                            );
+
+                        if (percent != lastProgress) {
+                            reportProgress(
+                                env,
+                                listener,
+                                progressMethod,
+                                percent
+                            );
+                            lastProgress = percent;
+                        }
+                    }
+                }
+            } else if (
+                audioOutput &&
+                packet->stream_index ==
+                    audioInputIndex
+            ) {
+                AVPacket* audioPacket =
+                    av_packet_clone(packet);
+
+                if (!audioPacket) {
+                    error = "تعذر نسخ إطار الصوت";
+                    break;
+                }
+
+                audioPacket->stream_index =
+                    audioOutput->index;
+
+                av_packet_rescale_ts(
+                    audioPacket,
+                    input->streams[audioInputIndex]
+                        ->time_base,
+                    audioOutput->time_base
+                );
+
+                ret = av_interleaved_write_frame(
+                    output,
+                    audioPacket
+                );
+
+                av_packet_free(&audioPacket);
+
+                if (ret < 0) {
+                    error =
+                        "كتابة الصوت فشلت: " +
+                        ffError(ret);
+                    break;
+                }
+            }
+
+            av_packet_unref(packet);
+
+            if (ret < 0 || g_cancel.load()) {
+                break;
+            }
+        }
+
+        if (g_cancel.load()) {
+            error = "تم إلغاء العملية";
+            break;
+        }
+
+        if (ret != AVERROR_EOF && ret < 0) {
+            error =
+                "قراءة الفيديو فشلت: " +
+                ffError(ret);
+            break;
+        }
+
+        ret = avcodec_send_packet(
+            decoder,
+            nullptr
+        );
+
+        if (ret < 0) {
+            error =
+                "إنهاء فك الفيديو فشل: " +
+                ffError(ret);
+            break;
+        }
+
+        while (true) {
+            ret = avcodec_receive_frame(
+                decoder,
+                decodedFrame
+            );
+
+            if (ret == AVERROR(EAGAIN) ||
+                ret == AVERROR_EOF) {
+                ret = 0;
+                break;
+            }
+
+            if (ret < 0) {
+                error =
+                    "تفريغ مفكك الفيديو فشل: " +
+                    ffError(ret);
+                break;
+            }
+
+            ret = av_buffersrc_add_frame_flags(
+                source,
+                decodedFrame,
+                AV_BUFFERSRC_FLAG_KEEP_REF
+            );
+
+            av_frame_unref(decodedFrame);
+
+            if (ret < 0) break;
+
+            ret = drainFilter(
+                sink,
+                encoder,
+                output,
+                videoOutput
+            );
+
+            if (ret < 0) break;
+        }
+
+        if (ret < 0) {
+            error =
+                "تفريغ الفيديو فشل: " +
+                ffError(ret);
+            break;
+        }
+
+        ret = av_buffersrc_add_frame_flags(
+            source,
+            nullptr,
+            0
+        );
+
+        if (ret < 0) {
+            error =
+                "إنهاء filter فشل: " +
+                ffError(ret);
+            break;
+        }
+
+        ret = drainFilter(
+            sink,
+            encoder,
+            output,
+            videoOutput
+        );
+
+        if (ret < 0) {
+            error =
+                "تفريغ filter فشل: " +
+                ffError(ret);
+            break;
+        }
+
+        ret = writeEncodedVideo(
+            encoder,
+            output,
+            videoOutput,
+            nullptr
+        );
+
+        if (ret < 0) {
+            error =
+                "إنهاء encoder الفيديو فشل: " +
+                ffError(ret);
+            break;
+        }
+
+        ret = av_write_trailer(output);
+
+        if (ret < 0) {
+            error =
+                "إنهاء MP4 فشل: " +
+                ffError(ret);
+            break;
+        }
+
+        reportProgress(
+            env,
+            listener,
+            progressMethod,
+            100
+        );
+
+        error.clear();
+    } while (false);
+
+    if (packet) av_packet_free(&packet);
+    if (decodedFrame) av_frame_free(&decodedFrame);
+
+    if (graph) avfilter_graph_free(&graph);
+
+    if (output) {
+        if (output->pb) avio_closep(&output->pb);
+        avformat_free_context(output);
+    }
+
+    if (encoder) avcodec_free_context(&encoder);
+    if (decoder) avcodec_free_context(&decoder);
+
+    if (input) avformat_close_input(&input);
+
+    close(inputFd);
+    close(outputFd);
+
+    return error;
+}
+
+}  // namespace
+
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_com_hyouka_videofps_FpsProcessor_process(
+    JNIEnv* env,
+    jobject,
+    jint inputFd,
+    jint outputFd,
+    jint targetFps,
+    jlong durationUs,
+    jobject listener
+) {
+    if (targetFps != 60 &&
+        targetFps != 90 &&
+        targetFps != 120) {
+        return env->NewStringUTF(
+            "FPS غير مدعوم"
+        );
+    }
+
+    if (inputFd < 0 || outputFd < 0) {
+        return env->NewStringUTF(
+            "ملف الإدخال أو الإخراج غير صالح"
+        );
+    }
+
+    if (!listener) {
+        return env->NewStringUTF(
+            "مستمع التقدم غير صالح"
+        );
+    }
+
+    const std::string error =
+        processVideo(
+            inputFd,
+            outputFd,
+            targetFps,
+            durationUs,
+            env,
+            listener
+        );
+
+    if (error.empty()) {
+        return nullptr;
+    }
+
+    return env->NewStringUTF(
+        error.c_str()
+    );
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_hyouka_videofps_FpsProcessor_cancel(
+    JNIEnv*,
+    jobject
+) {
+    g_cancel.store(true);
+}
