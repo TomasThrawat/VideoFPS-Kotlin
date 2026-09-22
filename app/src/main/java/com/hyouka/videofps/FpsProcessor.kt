@@ -1,6 +1,9 @@
 package com.hyouka.videofps
 
 object FpsProcessor {
+    @Volatile
+    private var progressListener: ProgressListener? = null
+
     init {
         try {
             AppLogger.i("Native", "Loading libvideofps.so")
@@ -14,12 +17,20 @@ object FpsProcessor {
         }
     }
 
+    fun setProgressListener(listener: ProgressListener?) {
+        progressListener = listener
+    }
+
+    @JvmStatic
+    fun dispatchProgress(percent: Int) {
+        progressListener?.onProgress(percent.coerceIn(0, 100))
+    }
+
     external fun process(
         inputFd: Int,
         outputFd: Int,
         targetFps: Int,
-        durationUs: Long,
-        listener: ProgressListener
+        durationUs: Long
     ): String?
 
     external fun getNativeBuildId(): String
