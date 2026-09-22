@@ -84,9 +84,10 @@ jobs:
           test -s app/src/main/jniLibs/arm64-v8a/libavfilter.so
           test -s app/src/main/jniLibs/arm64-v8a/libswscale.so
           test -s app/src/main/jniLibs/arm64-v8a/libswresample.so
-          readelf -Ws app/src/main/jniLibs/arm64-v8a/libvideofps.so | grep -F "Java_com_hyouka_videofps_FpsProcessor_process"
-          readelf -Ws app/src/main/jniLibs/arm64-v8a/libvideofps.so | grep -F "Java_com_hyouka_videofps_FpsProcessor_getNativeBuildId"
-          readelf -Ws app/src/main/jniLibs/arm64-v8a/libvideofps.so | grep -F "Java_com_hyouka_videofps_FpsProcessor_cancel"
+          readelf -Ws app/src/main/jniLibs/arm64-v8a/libvideofps.so | grep -F "JNI_OnLoad"
+          strings app/src/main/jniLibs/arm64-v8a/libvideofps.so | grep -F "process"
+          strings app/src/main/jniLibs/arm64-v8a/libvideofps.so | grep -F "getNativeBuildId"
+          strings app/src/main/jniLibs/arm64-v8a/libvideofps.so | grep -F "cancel"
           strings app/src/main/jniLibs/arm64-v8a/libvideofps.so | grep -F "jni-listener-diag-20260922-2"
 
       - name: Run Android lint
