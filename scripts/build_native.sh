@@ -119,22 +119,31 @@ mkdir -p "$DEST" "$INCLUDE_DEST"
 
 cp -a "$PREFIX/include/." "$INCLUDE_DEST/"
 cp -L "$OPENH264_PREFIX/lib/libopenh264.so.8" "$DEST/libopenh264.so.8"
+ln -sf libopenh264.so.8 "$DEST/libopenh264.so"
 
-for spec in \
-  "libavutil.so.61" \
-  "libavcodec.so.63" \
-  "libavformat.so.63" \
-  "libavfilter.so.12" \
-  "libswscale.so.10" \
-  "libswresample.so.7"
-do
-  lib="${spec%%.so.*}"
-  source="$(find "$PREFIX/lib" -maxdepth 1 -type f -name "${lib}.so.*" | sort | head -n1)"
+NATIVE_LIBS=(
+  libavutil
+  libavcodec
+  libavformat
+  libavfilter
+  libswscale
+  libswresample
+)
+
+for lib in "${NATIVE_LIBS[@]}"; do
+  source="$(find "$PREFIX/lib" -maxdepth 1 -type f -name "$lib.so.*" | sort | head -n1)"
   if [[ -z "$source" ]]; then
-    echo "Missing FFmpeg library: $spec"
+    source="$(find "$PREFIX/lib" -maxdepth 1 -type l -name "$lib.so*" | sort | head -n1)"
+  fi
+  if [[ -z "$source" ]]; then
+    echo "Missing FFmpeg library: $lib"
+    echo "Installed library files:"
+    find "$PREFIX/lib" -maxdepth 1 -name "$lib.so*" -printf "%f\n" | sort || true
     exit 2
   fi
-  cp -L "$source" "$DEST/$spec"
+  filename="$(basename "$source")"
+  cp -L "$source" "$DEST/$filename"
+  ln -sf "$filename" "$DEST/$lib.so"
 done
 
 "$CXX" \
@@ -164,4 +173,5 @@ done
 
 "$STRIP" --strip-unneeded "$DEST/libvideofps.so"
 
+echo "Native libraries prepared:"
 ls -lh "$DEST"
