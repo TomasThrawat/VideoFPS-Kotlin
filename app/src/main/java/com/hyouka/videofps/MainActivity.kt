@@ -42,7 +42,8 @@ class MainActivity : Activity() {
     private lateinit var infoText: TextView
     private lateinit var openButton: Button
 
-    private val executor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val executor: ExecutorService =
+        Executors.newSingleThreadExecutor()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -171,7 +172,7 @@ class MainActivity : Activity() {
 
     private fun fpsButton(fps: Int): Button {
         return Button(this).apply {
-            text = fps.toString() + " FPS"
+            text = "$fps FPS"
             setOnClickListener { startConversion(fps) }
         }
     }
@@ -185,45 +186,68 @@ class MainActivity : Activity() {
         cancelButton.visibility = View.VISIBLE
         openButton.visibility = View.GONE
         progressBar.progress = 0
-        statusText.text = "بدء التحويل إلى " + targetFps + " FPS..."
+        statusText.text = "بدء التحويل إلى $targetFps FPS..."
 
         executor.execute {
             val result = runConversion(input, targetFps)
             runOnUiThread {
                 processRunning = false
                 cancelButton.visibility = View.GONE
-                progressBar.progress = if (result.success) 100 else progressBar.progress
+                if (result.success) {
+                    progressBar.progress = 100
+                }
                 statusText.text = result.message
                 currentOutputUri = result.outputUri
-                openButton.visibility = if (result.success) View.VISIBLE else View.GONE
+                openButton.visibility =
+                    if (result.success) View.VISIBLE else View.GONE
                 setButtonsEnabled(selectedUri != null)
             }
         }
     }
 
-    private fun runConversion(inputUri: Uri, targetFps: Int): ConversionResult {
+    private fun runConversion(
+        inputUri: Uri,
+        targetFps: Int
+    ): ConversionResult {
         var inputFd = -1
         var outputFd = -1
         var outputUri: Uri? = null
 
         try {
             val metadata = readMetadata(inputUri)
+
             if (metadata.durationUs <= 0L) {
-                return ConversionResult(false, "تعذر قراءة مدة الفيديو", null)
-            }
-            if (metadata.width <= 0 || metadata.height <= 0) {
-                return ConversionResult(false, "تعذر قراءة دقة الفيديو", null)
-            }
-            if (metadata.width > 3840 || metadata.height > 2160) {
                 return ConversionResult(
                     false,
-                    "الفيديو أعلى من 4K. الإصدار الحالي يدعم حتى 3840 × 2160",
+                    "تعذر قراءة مدة الفيديو",
                     null
                 )
             }
 
-            val inputPfd = contentResolver.openFileDescriptor(inputUri, "r")
-                ?: return ConversionResult(false, "تعذر فتح الفيديو", null)
+            if (metadata.width <= 0 || metadata.height <= 0) {
+                return ConversionResult(
+                    false,
+                    "تعذر قراءة دقة الفيديو",
+                    null
+                )
+            }
+
+            if (metadata.width > 3840 || metadata.height > 2160) {
+                return ConversionResult(
+                    false,
+                    "الفيديو أعلى من 4K. الحد الأقصى 3840 × 2160",
+                    null
+                )
+            }
+
+            val inputPfd =
+                contentResolver.openFileDescriptor(inputUri, "r")
+                    ?: return ConversionResult(
+                        false,
+                        "تعذر فتح الفيديو",
+                        null
+                    )
+
             inputFd = inputPfd.detachFd()
 
             val values = ContentValues().apply {
@@ -242,14 +266,25 @@ class MainActivity : Activity() {
             outputUri = contentResolver.insert(
                 MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
                 values
-            ) ?: return ConversionResult(false, "تعذر إنشاء ملف الإخراج", null)
+            ) ?: return ConversionResult(
+                false,
+                "تعذر إنشاء ملف الإخراج",
+                null
+            )
 
-            val outputPfd = contentResolver.openFileDescriptor(outputUri, "w")
+            val outputPfd =
+                contentResolver.openFileDescriptor(outputUri, "w")
+
             if (outputPfd == null) {
                 contentResolver.delete(outputUri, null, null)
                 outputUri = null
-                return ConversionResult(false, "تعذر فتح ملف الإخراج", null)
+                return ConversionResult(
+                    false,
+                    "تعذر فتح ملف الإخراج",
+                    null
+                )
             }
+
             outputFd = outputPfd.detachFd()
 
             val error = FpsProcessor.process(
@@ -260,7 +295,7 @@ class MainActivity : Activity() {
             ) { percent ->
                 runOnUiThread {
                     progressBar.progress = percent
-                    statusText.text = "تحويل... " + percent + "%"
+                    statusText.text = "تحويل... $percent%"
                 }
             }
 
@@ -283,7 +318,7 @@ class MainActivity : Activity() {
 
             return ConversionResult(
                 true,
-                "تم إنشاء فيديو " + targetFps + " FPS في Movies/VideoFPS",
+                "تم إنشاء فيديو $targetFps FPS في Movies/VideoFPS",
                 outputUri
             )
         } catch (t: Throwable) {
@@ -293,6 +328,7 @@ class MainActivity : Activity() {
                 } catch (_: Throwable) {
                 }
             }
+
             return ConversionResult(
                 false,
                 t.message ?: "حدث خطأ أثناء التحويل",
@@ -319,11 +355,15 @@ class MainActivity : Activity() {
         button120.isEnabled = enabled && !processRunning
     }
 
-    private fun lp(top: Int = 0): LinearLayout.LayoutParams {
+    private fun lp(
+        top: Int = 0
+    ): LinearLayout.LayoutParams {
         return LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
-        ).also { it.topMargin = top }
+        ).also {
+            it.topMargin = top
+        }
     }
 
     private fun weightLp(): LinearLayout.LayoutParams {
@@ -378,17 +418,26 @@ class MainActivity : Activity() {
             null,
             null
         )
+
         cursor.use {
             if (it != null && it.moveToFirst()) {
                 return it.getString(0)
             }
         }
+
         return null
     }
 
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+    override fun onActivityResult(
+        requestCode: Int,
+        resultCode: Int,
+        data: Intent?
+    ) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != PICK_VIDEO || resultCode != RESULT_OK) return
+
+        if (requestCode != PICK_VIDEO || resultCode != RESULT_OK) {
+            return
+        }
 
         val uri = data?.data ?: return
         selectedUri = uri
@@ -406,16 +455,16 @@ class MainActivity : Activity() {
 
         infoText.text = buildString {
             append(selectedName)
+
             if (metadata.width > 0 && metadata.height > 0) {
-                append("
-")
+                append("\n")
                 append(metadata.width)
                 append(" × ")
                 append(metadata.height)
             }
+
             if (metadata.durationUs > 0) {
-                append("
-")
+                append("\n")
                 append(formatDuration(metadata.durationUs))
             }
         }
@@ -427,10 +476,17 @@ class MainActivity : Activity() {
         setButtonsEnabled(true)
     }
 
-    private fun buildOutputName(inputName: String, fps: Int): String {
+    private fun buildOutputName(
+        inputName: String,
+        fps: Int
+    ): String {
         val dot = inputName.lastIndexOf('.')
-        val base = if (dot > 0) inputName.substring(0, dot) else inputName
-        return base + "_" + fps + "fps.mp4"
+        val base = if (dot > 0) {
+            inputName.substring(0, dot)
+        } else {
+            inputName
+        }
+        return "$base_${fps}fps.mp4"
     }
 
     private fun formatDuration(durationUs: Long): String {
