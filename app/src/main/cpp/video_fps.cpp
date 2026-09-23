@@ -1045,7 +1045,7 @@ static jstring nativeGetNativeBuildId(
     return env->NewStringUTF(kNativeBuildId);
 }
 
-static jstring nativeProcess(
+static jstring nativeProcessNative(
     JNIEnv* env,
     jobject,
     jint inputFd,
@@ -1056,7 +1056,7 @@ static jstring nativeProcess(
     __android_log_print(
         ANDROID_LOG_INFO,
         "VideoFPS-Native",
-        "JNI nativeProcess entry"
+        "JNI nativeProcessNative entry"
     );
 
     nativeLog(
@@ -1120,9 +1120,9 @@ static void nativeCancel(
 
 static JNINativeMethod kNativeMethods[] = {
     {
-        "process",
+        "processNative",
         "(IIIJ)Ljava/lang/String;",
-        reinterpret_cast<void*>(nativeProcess)
+        reinterpret_cast<void*>(nativeProcessNative)
     },
     {
         "getNativeBuildId",
