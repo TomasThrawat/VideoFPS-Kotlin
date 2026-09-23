@@ -63,9 +63,15 @@ jobs:
 
       - name: Build FFmpeg and OpenH264
         run: |
-          if [[ -f app/src/main/jniLibs/arm64-v8a/libvideofps.so &&
-                -f app/src/main/jniLibs/arm64-v8a/libavutil.so &&
-                -f app/src/main/jniLibs/arm64-v8a/libc++_shared.so ]]; then
+          if [[ -s app/src/main/jniLibs/arm64-v8a/libvideofps.so &&
+                -s app/src/main/jniLibs/arm64-v8a/libopenh264.so.8 &&
+                -s app/src/main/jniLibs/arm64-v8a/libavutil.so &&
+                -s app/src/main/jniLibs/arm64-v8a/libavcodec.so &&
+                -s app/src/main/jniLibs/arm64-v8a/libavformat.so &&
+                -s app/src/main/jniLibs/arm64-v8a/libavfilter.so &&
+                -s app/src/main/jniLibs/arm64-v8a/libswscale.so &&
+                -s app/src/main/jniLibs/arm64-v8a/libswresample.so &&
+                -s app/src/main/jniLibs/arm64-v8a/libc++_shared.so ]]; then
             echo "Using cached native libraries for the current native-source hash."
           else
             chmod +x scripts/build_native.sh

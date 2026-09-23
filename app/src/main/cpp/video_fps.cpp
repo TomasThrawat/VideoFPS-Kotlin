@@ -778,6 +778,10 @@ std::string processVideo(
                     const int64_t timestamp =
                         decodedFrame->best_effort_timestamp;
 
+                    if (timestamp != AV_NOPTS_VALUE) {
+                        decodedFrame->pts = timestamp;
+                    }
+
                     ret = av_buffersrc_add_frame(
                         source,
                         decodedFrame
@@ -914,6 +918,10 @@ std::string processVideo(
                     "تفريغ مفكك الفيديو فشل: " +
                     ffError(ret);
                 break;
+            }
+
+            if (decodedFrame->best_effort_timestamp != AV_NOPTS_VALUE) {
+                decodedFrame->pts = decodedFrame->best_effort_timestamp;
             }
 
             ret = av_buffersrc_add_frame(
@@ -1094,6 +1102,8 @@ static jstring nativeProcessNative(
     }
 
     if (!thiz) {
+        close(inputFd);
+        close(outputFd);
         return env->NewStringUTF("مستقبل JNI غير صالح");
     }
 

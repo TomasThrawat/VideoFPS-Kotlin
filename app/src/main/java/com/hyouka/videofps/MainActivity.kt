@@ -332,7 +332,7 @@ class MainActivity : Activity() {
                 return ConversionResult(false, error, null)
             }
 
-            contentResolver.update(
+            val publishedRows = contentResolver.update(
                 outputUri,
                 ContentValues().apply {
                     put(MediaStore.Video.Media.IS_PENDING, 0)
@@ -340,6 +340,19 @@ class MainActivity : Activity() {
                 null,
                 null
             )
+            if (publishedRows != 1) {
+                AppLogger.e(
+                    "Conversion",
+                    "Failed to publish output MediaStore row count=" + publishedRows
+                )
+                contentResolver.delete(outputUri, null, null)
+                outputUri = null
+                return ConversionResult(
+                    false,
+                    "تعذر إتاحة ملف الإخراج",
+                    null
+                )
+            }
 
             return ConversionResult(
                 true,

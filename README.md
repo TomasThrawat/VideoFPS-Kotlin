@@ -7,14 +7,14 @@
 - 60 / 90 / 120 FPS.
 - حفظ الناتج في Movies/VideoFPS.
 - معالجة محلية على الجهاز.
-- لا ينشئ logs داخل Download.
+- يسجل Diagnostics في Download/VideoFPS-Diagnostics.log.
 - بناء arm64-v8a.
 
 ## Build
 
-GitHub Actions يبني FFmpeg وOpenH264 ثم يبني APK Release.
+GitHub Actions يبني FFmpeg وOpenH264 ثم يبني APK Debug للتحقق والتنزيل.
 
 الناتج:
-app/build/outputs/apk/release/app-release.apk
+app/build/outputs/apk/debug/app-debug.apk
 
 راجع THIRD_PARTY_LICENSES.md للمكونات الخارجية.
