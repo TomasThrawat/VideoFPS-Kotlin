@@ -26,7 +26,16 @@ object FpsProcessor {
         progressListener?.onProgress(percent.coerceIn(0, 100))
     }
 
-    external fun process(
+    fun process(
+        inputFd: Int,
+        outputFd: Int,
+        targetFps: Int,
+        durationUs: Long
+    ): String? {
+        return processNative(inputFd, outputFd, targetFps, durationUs)
+    }
+
+    private external fun processNative(
         inputFd: Int,
         outputFd: Int,
         targetFps: Int,
