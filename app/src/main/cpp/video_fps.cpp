@@ -22,7 +22,7 @@ extern "C" {
 
 namespace {
 
-constexpr const char* kNativeBuildId = "jni-fd-protocol-20260923-4";
+constexpr const char* kNativeBuildId = "jni-performance-20260923-5";
 
 void nativeLog(const char* level, const char* format, ...) {
     va_list args;
@@ -73,13 +73,13 @@ int writeEncodedVideo(
     AVCodecContext* encoder,
     AVFormatContext* output,
     AVStream* outputStream,
-    AVFrame* frame
+    AVFrame* frame,
+    AVPacket* packet
 ) {
+    if (!packet) return AVERROR(EINVAL);
+
     int ret = avcodec_send_frame(encoder, frame);
     if (ret < 0) return ret;
-
-    AVPacket* packet = av_packet_alloc();
-    if (!packet) return AVERROR(ENOMEM);
 
     while (true) {
         ret = avcodec_receive_packet(encoder, packet);
@@ -106,7 +106,6 @@ int writeEncodedVideo(
         if (ret < 0) break;
     }
 
-    av_packet_free(&packet);
     return ret;
 }
 
@@ -114,13 +113,14 @@ int drainFilter(
     AVFilterContext* sink,
     AVCodecContext* encoder,
     AVFormatContext* output,
-    AVStream* outputStream
+    AVStream* outputStream,
+    AVFrame* frame,
+    AVPacket* encodedPacket
 ) {
+    if (!frame || !encodedPacket) return AVERROR(EINVAL);
+
     const AVRational sinkTimeBase =
         av_buffersink_get_time_base(sink);
-
-    AVFrame* frame = av_frame_alloc();
-    if (!frame) return AVERROR(ENOMEM);
 
     int ret = 0;
 
@@ -146,7 +146,8 @@ int drainFilter(
             encoder,
             output,
             outputStream,
-            frame
+            frame,
+            encodedPacket
         );
 
         av_frame_unref(frame);
@@ -154,7 +155,6 @@ int drainFilter(
         if (ret < 0) break;
     }
 
-    av_frame_free(&frame);
     return ret;
 }
 
@@ -197,7 +197,9 @@ std::string processVideo(
     AVFilterContext* sink = nullptr;
 
     AVPacket* packet = nullptr;
+    AVPacket* encodedPacket = nullptr;
     AVFrame* decodedFrame = nullptr;
+    AVFrame* filterFrame = nullptr;
 
     int videoInputIndex = -1;
     int audioInputIndex = -1;
@@ -584,13 +586,17 @@ std::string processVideo(
                 break;
             }
 
-            std::string filterChain =
-                "format=pix_fmts=yuv420p";
+            std::string filterChain;
+            if (decoder->pix_fmt != AV_PIX_FMT_YUV420P) {
+                filterChain = "format=pix_fmts=yuv420p";
+            }
 
             if ((decoder->width & 1) ||
                 (decoder->height & 1)) {
                 filterChain +=
-                    ",scale=trunc(iw/2)*2:trunc(ih/2)*2";
+                    (filterChain.empty() ? "" : ",");
+                filterChain +=
+                    "scale=trunc(iw/2)*2:trunc(ih/2)*2";
             }
 
             if (decoder->field_order !=
@@ -598,11 +604,15 @@ std::string processVideo(
                 decoder->field_order !=
                     AV_FIELD_UNKNOWN) {
                 filterChain +=
-                    ",yadif=mode=send_frame";
+                    (filterChain.empty() ? "" : ",");
+                filterChain +=
+                    "yadif=mode=send_frame";
             }
 
             filterChain +=
-                ",minterpolate=fps=" +
+                (filterChain.empty() ? "" : ",");
+            filterChain +=
+                "minterpolate=fps=" +
                 std::to_string(targetFps) +
                 ":mi_mode=mci:"
                 "mc_mode=aobmc:"
@@ -713,9 +723,11 @@ std::string processVideo(
         }
 
         packet = av_packet_alloc();
+        encodedPacket = av_packet_alloc();
         decodedFrame = av_frame_alloc();
+        filterFrame = av_frame_alloc();
 
-        if (!packet || !decodedFrame) {
+        if (!packet || !encodedPacket || !decodedFrame || !filterFrame) {
             error =
                 "تعذر تخصيص ذاكرة التحويل";
             break;
@@ -766,10 +778,9 @@ std::string processVideo(
                     const int64_t timestamp =
                         decodedFrame->best_effort_timestamp;
 
-                    ret = av_buffersrc_add_frame_flags(
+                    ret = av_buffersrc_add_frame(
                         source,
-                        decodedFrame,
-                        AV_BUFFERSRC_FLAG_KEEP_REF
+                        decodedFrame
                     );
 
                     av_frame_unref(decodedFrame);
@@ -785,7 +796,9 @@ std::string processVideo(
                         sink,
                         encoder,
                         output,
-                        videoOutput
+                        videoOutput,
+                        filterFrame,
+                        encodedPacket
                     );
 
                     if (ret < 0) {
@@ -830,19 +843,11 @@ std::string processVideo(
                 packet->stream_index ==
                     audioInputIndex
             ) {
-                AVPacket* audioPacket =
-                    av_packet_clone(packet);
-
-                if (!audioPacket) {
-                    error = "تعذر نسخ إطار الصوت";
-                    break;
-                }
-
-                audioPacket->stream_index =
+                packet->stream_index =
                     audioOutput->index;
 
                 av_packet_rescale_ts(
-                    audioPacket,
+                    packet,
                     input->streams[audioInputIndex]
                         ->time_base,
                     audioOutput->time_base
@@ -850,10 +855,8 @@ std::string processVideo(
 
                 ret = av_interleaved_write_frame(
                     output,
-                    audioPacket
+                    packet
                 );
-
-                av_packet_free(&audioPacket);
 
                 if (ret < 0) {
                     error =
@@ -913,10 +916,9 @@ std::string processVideo(
                 break;
             }
 
-            ret = av_buffersrc_add_frame_flags(
+            ret = av_buffersrc_add_frame(
                 source,
-                decodedFrame,
-                AV_BUFFERSRC_FLAG_KEEP_REF
+                decodedFrame
             );
 
             av_frame_unref(decodedFrame);
@@ -927,7 +929,9 @@ std::string processVideo(
                 sink,
                 encoder,
                 output,
-                videoOutput
+                videoOutput,
+                filterFrame,
+                encodedPacket
             );
 
             if (ret < 0) break;
@@ -940,10 +944,9 @@ std::string processVideo(
             break;
         }
 
-        ret = av_buffersrc_add_frame_flags(
+        ret = av_buffersrc_add_frame(
             source,
-            nullptr,
-            0
+            nullptr
         );
 
         if (ret < 0) {
@@ -957,7 +960,9 @@ std::string processVideo(
             sink,
             encoder,
             output,
-            videoOutput
+            videoOutput,
+            filterFrame,
+            encodedPacket
         );
 
         if (ret < 0) {
@@ -971,7 +976,8 @@ std::string processVideo(
             encoder,
             output,
             videoOutput,
-            nullptr
+            nullptr,
+            encodedPacket
         );
 
         if (ret < 0) {
@@ -1002,7 +1008,9 @@ std::string processVideo(
     } while (false);
 
     if (packet) av_packet_free(&packet);
+    if (encodedPacket) av_packet_free(&encodedPacket);
     if (decodedFrame) av_frame_free(&decodedFrame);
+    if (filterFrame) av_frame_free(&filterFrame);
 
     if (graph) avfilter_graph_free(&graph);
 
@@ -1018,8 +1026,6 @@ std::string processVideo(
 
     close(inputFd);
     close(outputFd);
-
-    env->DeleteLocalRef(processorClass);
 
     nativeLog(
         error.empty() ? "I" : "E",
@@ -1074,10 +1080,14 @@ static jstring nativeProcessNative(
     if (targetFps != 60 &&
         targetFps != 90 &&
         targetFps != 120) {
+        if (inputFd >= 0) close(inputFd);
+        if (outputFd >= 0) close(outputFd);
         return env->NewStringUTF("FPS غير مدعوم");
     }
 
     if (inputFd < 0 || outputFd < 0) {
+        if (inputFd >= 0) close(inputFd);
+        if (outputFd >= 0) close(outputFd);
         return env->NewStringUTF(
             "ملف الإدخال أو الإخراج غير صالح"
         );
@@ -1093,6 +1103,8 @@ static jstring nativeProcessNative(
             env->ExceptionDescribe();
             env->ExceptionClear();
         }
+        close(inputFd);
+        close(outputFd);
         return env->NewStringUTF("تعذر الوصول إلى FpsProcessor class");
     }
 
@@ -1109,6 +1121,8 @@ static jstring nativeProcessNative(
             env->ExceptionClear();
         }
         env->DeleteLocalRef(processorClass);
+        close(inputFd);
+        close(outputFd);
         return env->NewStringUTF(
             "تعذر تجهيز مستمع التقدم: dispatchProgress(I)V غير موجود"
         );

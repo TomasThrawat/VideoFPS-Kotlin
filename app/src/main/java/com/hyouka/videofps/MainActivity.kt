@@ -275,10 +275,16 @@ class MainActivity : Activity() {
             AppLogger.i("Conversion", "Output FD detached=" + outputFd)
 
             val listener = object : FpsProcessor.ProgressListener {
+                private var lastUiUpdateAt = 0L
+
                 override fun onProgress(percent: Int) {
+                    val value = percent.coerceIn(0, 100)
+                    val now = android.os.SystemClock.uptimeMillis()
+                    if (value != 100 && now - lastUiUpdateAt < 100L) return
+                    lastUiUpdateAt = now
                     runOnUiThread {
-                        progressBar.progress = percent.coerceIn(0, 100)
-                        statusText.text = "جاري التحويل... $percent%"
+                        progressBar.progress = value
+                        statusText.text = "جاري التحويل... $value%"
                     }
                 }
             }
@@ -296,26 +302,28 @@ class MainActivity : Activity() {
                     " durationUs=" + metadata.durationUs
             )
 
+            val inputFdUsed = inputFd
+            val outputFdUsed = outputFd
             val error = try {
                 FpsProcessor.process(
-                    inputFd,
-                    outputFd,
+                    inputFdUsed,
+                    outputFdUsed,
                     targetFps,
                     metadata.durationUs
                 )
             } finally {
                 FpsProcessor.setProgressListener(null)
             }
-            closeFd(inputFd)
+
+            // Native takes ownership of valid detached FDs and closes them.
             inputFd = -1
-            closeFd(outputFd)
             outputFd = -1
 
             AppLogger.i(
                 "Native",
                 "FpsProcessor.process returned=" + (error ?: "success") +
-                    " inputFdWas=" + inputFd +
-                    " outputFdWas=" + outputFd
+                    " inputFdWas=" + inputFdUsed +
+                    " outputFdWas=" + outputFdUsed
             )
             if (error != null) {
                 AppLogger.e("Conversion", "Conversion failed: " + error)
