@@ -16,12 +16,13 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/error.h>
 #include <libavutil/frame.h>
+#include <libavutil/dict.h>
 #include <libavutil/mathematics.h>
 }
 
 namespace {
 
-constexpr const char* kNativeBuildId = "jni-process-primitive-20260922-3";
+constexpr const char* kNativeBuildId = "jni-fd-protocol-20260923-4";
 
 void nativeLog(const char* level, const char* format, ...) {
     va_list args;
@@ -162,7 +163,9 @@ std::string processVideo(
     int outputFd,
     int targetFps,
     int64_t durationUs,
-    JNIEnv* env
+    JNIEnv* env,
+    jclass processorClass,
+    jmethodID progressMethod
 ) {
     g_cancel.store(false);
 
@@ -175,53 +178,13 @@ std::string processVideo(
         static_cast<long long>(durationUs)
     );
 
-    nativeLog("I", "Resolving FpsProcessor.dispatchProgress(I)V");
-    jclass processorClass =
-        env->FindClass("com/hyouka/videofps/FpsProcessor");
-
-    if (!processorClass) {
-        const bool hasException = env->ExceptionCheck();
-        nativeLog(
-            "E",
-            "FindClass(FpsProcessor) failed exception=%s",
-            hasException ? "yes" : "no"
-        );
-        if (hasException) {
-            env->ExceptionDescribe();
-            env->ExceptionClear();
-        }
-        return "تعذر تجهيز مستمع التقدم: FpsProcessor class غير موجود";
+    if (!env || !processorClass || !progressMethod) {
+        nativeLog("E", "Invalid JNI callback state");
+        return "تعذر تجهيز مستمع التقدم";
     }
 
-    jmethodID progressMethod =
-        env->GetStaticMethodID(
-            processorClass,
-            "dispatchProgress",
-            "(I)V"
-        );
-
-    if (!progressMethod) {
-        const bool hasException = env->ExceptionCheck();
-        nativeLog(
-            "E",
-            "GetStaticMethodID(dispatchProgress,(I)V) failed exception=%s",
-            hasException ? "yes" : "no"
-        );
-        if (hasException) {
-            env->ExceptionDescribe();
-            env->ExceptionClear();
-        }
-        env->DeleteLocalRef(processorClass);
-        return "تعذر تجهيز مستمع التقدم: dispatchProgress(I)V غير موجود";
-    }
-
-    nativeLog("I", "Progress dispatcher resolved successfully");
-
-    const std::string inputPath =
-        "/proc/self/fd/" + std::to_string(inputFd);
-
-    const std::string outputPath =
-        "/proc/self/fd/" + std::to_string(outputFd);
+    const std::string inputFdValue = std::to_string(inputFd);
+    const std::string outputFdValue = std::to_string(outputFd);
 
     AVFormatContext* input = nullptr;
     AVFormatContext* output = nullptr;
@@ -246,13 +209,27 @@ std::string processVideo(
     av_log_set_level(AV_LOG_ERROR);
 
     do {
-        nativeLog("I", "Opening input path=%s", inputPath.c_str());
+        nativeLog("I", "Opening input via fd protocol fd=%d", inputFd);
+        AVDictionary* inputOptions = nullptr;
+        ret = av_dict_set(
+            &inputOptions,
+            "fd",
+            inputFdValue.c_str(),
+            0
+        );
+        if (ret < 0) {
+            error = "تهيئة خيار FD للإدخال فشلت: " + ffError(ret);
+            av_dict_free(&inputOptions);
+            break;
+        }
+
         ret = avformat_open_input(
             &input,
-            inputPath.c_str(),
+            "fd:",
             nullptr,
-            nullptr
+            &inputOptions
         );
+        av_dict_free(&inputOptions);
 
         if (ret < 0) {
             nativeLog("E", "avformat_open_input failed ret=%d error=%s", ret, ffError(ret).c_str());
@@ -364,7 +341,7 @@ std::string processVideo(
             &output,
             nullptr,
             "mp4",
-            outputPath.c_str()
+            "fd:"
         );
 
         if (ret < 0 || !output) {
@@ -691,11 +668,28 @@ std::string processVideo(
             }
         }
 
-        ret = avio_open(
-            &output->pb,
-            outputPath.c_str(),
-            AVIO_FLAG_WRITE
+        nativeLog("I", "Opening output via fd protocol fd=%d", outputFd);
+        AVDictionary* outputOptions = nullptr;
+        ret = av_dict_set(
+            &outputOptions,
+            "fd",
+            outputFdValue.c_str(),
+            0
         );
+        if (ret < 0) {
+            error = "تهيئة خيار FD للإخراج فشلت: " + ffError(ret);
+            av_dict_free(&outputOptions);
+            break;
+        }
+
+        ret = avio_open2(
+            &output->pb,
+            "fd:",
+            AVIO_FLAG_WRITE,
+            nullptr,
+            &outputOptions
+        );
+        av_dict_free(&outputOptions);
 
         if (ret < 0) {
             error =
@@ -1047,7 +1041,7 @@ static jstring nativeGetNativeBuildId(
 
 static jstring nativeProcessNative(
     JNIEnv* env,
-    jobject,
+    jobject thiz,
     jint inputFd,
     jint outputFd,
     jint targetFps,
@@ -1089,14 +1083,51 @@ static jstring nativeProcessNative(
         );
     }
 
+    if (!thiz) {
+        return env->NewStringUTF("مستقبل JNI غير صالح");
+    }
+
+    jclass processorClass = env->GetObjectClass(thiz);
+    if (!processorClass) {
+        if (env->ExceptionCheck()) {
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+        }
+        return env->NewStringUTF("تعذر الوصول إلى FpsProcessor class");
+    }
+
+    jmethodID progressMethod =
+        env->GetStaticMethodID(
+            processorClass,
+            "dispatchProgress",
+            "(I)V"
+        );
+
+    if (!progressMethod) {
+        if (env->ExceptionCheck()) {
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+        }
+        env->DeleteLocalRef(processorClass);
+        return env->NewStringUTF(
+            "تعذر تجهيز مستمع التقدم: dispatchProgress(I)V غير موجود"
+        );
+    }
+
+    nativeLog("I", "JNI progress dispatcher resolved successfully");
+
     const std::string error =
         processVideo(
             inputFd,
             outputFd,
             targetFps,
             durationUs,
-            env
+            env,
+            processorClass,
+            progressMethod
         );
+
+    env->DeleteLocalRef(processorClass);
 
     nativeLog(
         error.empty() ? "I" : "E",
